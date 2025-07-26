@@ -16,13 +16,14 @@ destination_dir = '/data/cristian/projects/med_data/rise-miccai/'
 # Load environment variables from .env file
 load_dotenv()
 # Authenticate with Synapse using the token from the environment variable
-TOKEN_SYNAPSE = os.getenv('TOKEN_SYNAPSE')
+DATASET_TOKEN_SYNAPSE = os.getenv('DATASET_TOKEN_SYNAPSE')
+DATASET_ID_SYNAPSE    = os.getenv('DATASET_ID_SYNAPSE')
 
 if not os.path.exists(destination_dir):
-    print("Using Synapse token:", TOKEN_SYNAPSE[:4])
+    print("Using Synapse token:", DATASET_TOKEN_SYNAPSE[:2])
     syn = synapseclient.Synapse() 
-    syn.login(authToken=TOKEN_SYNAPSE) 
-    files = synapseutils.syncFromSynapse(syn, 'syn68646516') 
+    syn.login(authToken=DATASET_ID_SYNAPSE) 
+    files = synapseutils.syncFromSynapse(syn, DATASET_ID_SYNAPSE) 
 
     #[syn68647084]: Downloaded to /home/va0831/.synapseCache/818/160229818/LISA_0043_ciso.nii.gz
 
