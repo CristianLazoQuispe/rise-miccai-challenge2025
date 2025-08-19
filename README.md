@@ -25,3 +25,25 @@ python codes/1.download_data.py
 scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/LISAHF0001segprediction.nii.gz .
 
 scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/LISAHF0001segprediction.nii.gz C:\Users\TU_USUARIO\Downloads\
+
+
+```bash
+python train.py \
+  --train_csv results/preprocessed_data/task2/df_train_hipp.csv \
+  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_01 \
+  --model unest \
+  --folds 3 \
+  --epochs 50 \
+  --batch_size 4 \
+  --gpu 5
+```
+
+
+```bash
+python inference.py \
+  --test_csv results/preprocessed_data/task2/df_test_hipp.csv \
+  --model_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_01/fold_0 \
+  --model unest \
+  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/
+```
+"""

@@ -1,180 +1,302 @@
 """
-Dataset utilities for the RISE‑MICCAI LISA 2025 hippocampus segmentation task.
+Dataset and data utilities for the RISE‑MICCAI LISA 2025 hippocampus segmentation task.
 
-This module defines a PyTorch Dataset class to load CISO images and their
-corresponding merged HF/LF hippocampal segmentations from NIfTI files.  It
-also provides helper functions to perform group‑wise cross‑validation splits
-using the subject identifiers contained in the CSV metadata.
+This module leverages MONAI's data loading and transformation pipeline to
+streamline preprocessing, resampling, cropping/padding and augmentation of
+3D volumetric MRI data.  Unlike the original implementation, which
+performed these steps manually with ``nibabel``, ``numpy`` and ``scipy``,
+the functions here delegate these responsibilities to MONAI transforms.
 
-Note that this code relies on external libraries (`torch`, `nibabel`,
-`numpy`, `pandas` and `scikit‑learn`) which are not available in the
-current environment.  The provided implementation illustrates how to
-structure the data loading and splitting logic – you should run it on a
-machine with the required dependencies installed.
+The key entry points are:
+
+* :func:`get_data_list` – convert a ``pandas.DataFrame`` with filepaths into
+  a list of dictionaries compatible with MONAI datasets.
+* :func:`get_train_transform` and :func:`get_val_transform` – assemble
+  deterministic and random transforms for training and validation/test
+  pipelines, including spacing normalisation, intensity scaling and
+  optional augmentation.
+* :func:`get_dataset` – wrap a data list and transform into a
+  ``monai.data.Dataset``.  You may substitute ``monai.data.CacheDataset``
+  or ``PersistentDataset`` here to accelerate repeated data loading.
+* :func:`create_group_splits` – generate group‑wise cross‑validation
+  splits using subject identifiers to prevent leakage between HF/LF
+  scans of the same patient.
+* :func:`compute_class_weights` – compute inverse‑frequency class weights
+  from the segmentation volumes.  This function still uses ``nibabel`` to
+  read the label files because MONAI transforms operate within the
+  training loop; computing weights beforehand avoids loading the
+  entire dataset into memory multiple times.
+
+To use this module, install MONAI and nibabel in your environment.  The
+functions will raise an exception at runtime if these dependencies are
+missing.
 """
 
 from __future__ import annotations
 
 import os
+from typing import List, Tuple, Optional, Sequence
+
 import numpy as np
 import pandas as pd
-from typing import List, Tuple, Optional
 
-# External dependencies required for full functionality
 try:
-    import torch
-    from torch.utils.data import Dataset
+    # Core MONAI components for data loading and transforms
+    from monai.data import Dataset
+    from monai.transforms import (
+        Compose,
+        LoadImaged,
+        EnsureChannelFirstd,
+        Spacingd,
+        ScaleIntensityRanged,
+        ResizeWithPadOrCropd,
+        RandFlipd,
+        RandRotate90d,
+        RandAffined,
+        RandGaussianNoised,
+        ToTensord,
+        EnsureTyped,
+    )
+except ImportError as e:
+    Dataset = None  # type: ignore
+    Compose = LoadImaged = EnsureChannelFirstd = Spacingd = ScaleIntensityRanged = None  # type: ignore
+    ResizeWithPadOrCropd = RandFlipd = RandRotate90d = RandAffined = RandGaussianNoised = ToTensord = None  # type: ignore
+    EnsureTyped = None  # type: ignore
+
+try:
     import nibabel as nib
+except ImportError:
+    nib = None  # type: ignore
+
+try:
     from sklearn.model_selection import GroupKFold
 except ImportError:
-    # When running in an environment without these libraries, define
-    # placeholders so that type hints remain valid.  The actual runtime
-    # functionality will not work until the dependencies are installed.
-    torch = None  # type: ignore
-    nib = None  # type: ignore
-    Dataset = object  # type: ignore
     GroupKFold = None  # type: ignore
 
 
-class HippocampusDataset(Dataset):
-    """PyTorch dataset for loading 3D MR volumes and hippocampus segmentations.
+def get_data_list(df: pd.DataFrame, is_test: bool = False) -> List[dict]:
+    """Convert a DataFrame of filepaths into a list of dictionaries for MONAI.
+
+    Each entry in the returned list has keys ``"image"`` and, if
+    ``is_test`` is ``False``, ``"label"``.  MONAI's ``LoadImaged``
+    transform recognises these keys and loads the corresponding NIfTI
+    volumes.  The ``ID`` column is ignored at this stage but can be
+    used externally to perform group‑wise splits.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        DataFrame containing at least the columns ``filepath`` (path to the
-        CISO image) and, if labels are available, ``filepath_label`` (path
-        to the merged hippocampal segmentation).  The DataFrame should also
-        include an ``ID`` column identifying the subject; this is used for
-        group‑wise cross‑validation but is not accessed inside the dataset.
+        Input DataFrame containing at least the column ``filepath`` and
+        optionally ``filepath_label`` when labels are available.
     is_test : bool, optional
-        If ``True``, the dataset will return only images and omit labels.
-        Use this for inference on the validation/test set where ground truth
-        segmentations are not available.  Default is ``False``.
-    resample_spacing : Optional[Tuple[float, float, float]], optional
-        Desired voxel spacing (in millimetres) to resample the images and
-        labels to.  If provided, both image and label volumes will be
-        resampled using linear and nearest interpolation, respectively.
-        Passing ``None`` disables resampling.  Note that resampling
-        requires access to the image header; if nibabel is not installed
-        this option will have no effect.  Default is ``None``.
-    spatial_size : Tuple[int, int, int]
-        Spatial size (depth, height, width) to which the resampled volumes
-        will be cropped or padded.  The default (96, 96, 96) matches the
-        input size expected by the pretrained UNesT network.  Larger
-        volumes will be centre‑cropped and smaller volumes will be zero‑padded.
+        If ``True``, the data list will include only the ``image`` key.
+
+    Returns
+    -------
+    List[dict]
+        A list of dictionaries mapping key names to filepaths.
     """
+    data: List[dict] = []
+    for _, row in df.iterrows():
+        item = {"image": row["filepath"]}
+        if not is_test and "filepath_label" in row and pd.notna(row["filepath_label"]):
+            item["label"] = row["filepath_label"]
+        data.append(item)
+    return data
 
-    def __init__(
-        self,
-        df: pd.DataFrame,
-        is_test: bool = False,
-        resample_spacing: Optional[Tuple[float, float, float]] = None,
-        spatial_size: Tuple[int, int, int] = (96, 96, 96),
-    ) -> None:
-        super().__init__()
-        self.df = df.reset_index(drop=True)
-        self.is_test = is_test
-        self.resample_spacing = resample_spacing
-        self.spatial_size = spatial_size
 
-    def __len__(self) -> int:
-        return len(self.df)
+def get_train_transform(
+    spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    spatial_size: Tuple[int, int, int] = (96, 96, 96),
+    augment: bool = True,
+) -> Compose:
+    """Create a MONAI transform pipeline for training.
 
-    def __getitem__(self, index: int) -> dict:
-        if torch is None or nib is None:
-            raise RuntimeError(
-                "torch and nibabel must be installed to use the HippocampusDataset."
-            )
-        row = self.df.iloc[index]
-        img_path = row["filepath"]
-        # Load the image volume using nibabel
-        img_nii = nib.load(img_path)
-        img = img_nii.get_fdata().astype(np.float32)
+    The pipeline includes loading images/labels, ensuring channel order,
+    resampling to the specified voxel spacing, scaling intensities to
+    [0, 1], resizing with padding/cropping to the target spatial size and
+    optional random augmentations.  Finally, it converts the numpy arrays
+    into PyTorch tensors.
 
-        # Optional intensity normalisation: scale to [0,1]
-        img_min, img_max = img.min(), img.max()
-        if img_max > img_min:
-            img = (img - img_min) / (img_max - img_min)
+    Parameters
+    ----------
+    spacing : tuple of floats
+        Target voxel spacing (mm) for resampling.  Must match the spacing
+        used during training and inference.
+    spatial_size : tuple of ints
+        Desired output size (depth, height, width).
+    augment : bool, optional
+        If ``True``, include random flips, rotations, affine
+        transformations and additive noise.  Otherwise only deterministic
+        preprocessing is applied.  Default is ``True``.
 
-        # Resample to desired spacing if requested
-        if self.resample_spacing is not None:
-            # Using nibabel's affine to compute new shape.  This is a simple
-            # nearest‑neighbour resampling; for higher quality consider using
-            # scipy.ndimage.zoom or SimpleITK.  Here we avoid extra
-            # dependencies by implementing a basic rescale based on voxel
-            # spacing.
-            orig_spacing = np.abs(img_nii.header.get_zooms()[:3])
-            scale_factors = orig_spacing / np.array(self.resample_spacing)
-            new_shape = np.round(np.array(img.shape) * scale_factors).astype(int)
-            # Use numpy's zoom for simple interpolation.  order=1 for linear.
-            import scipy.ndimage
-            img = scipy.ndimage.zoom(img, zoom=scale_factors, order=1)
+    Returns
+    -------
+    monai.transforms.Compose
+        A composition of transforms to be applied sequentially.
+    """
+    if Compose is None:
+        raise ImportError("MONAI is required to build the transform pipeline.")
+    transforms = [
+        LoadImaged(keys=["image", "label"]),
+        EnsureChannelFirstd(keys=["image", "label"]),
+        # Resample to the desired spacing.  Image uses trilinear interpolation;
+        # label uses nearest neighbour to preserve discrete values.
+        Spacingd(keys=["image", "label"], pixdim=spacing, mode=("bilinear", "nearest")),
+        # Scale intensities from min/max range to [0, 1]
+        ScaleIntensityRanged(
+            keys=["image"],
+            a_min=0.0,
+            a_max=1.0,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True,
+        ),
+        # Resize or pad volumes to the target spatial size
+        ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=spatial_size),
+    ]
+    if augment:
+        transforms += [
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
+            RandRotate90d(keys=["image", "label"], prob=0.3, max_k=3),
+            RandAffined(
+                keys=["image", "label"],
+                prob=0.3,
+                rotate_range=(0.1, 0.1, 0.1),
+                translate_range=(5, 5, 5),
+                scale_range=(0.1, 0.1, 0.1),
+                mode=("bilinear", "nearest"),
+                padding_mode="border",
+            ),
+            RandGaussianNoised(keys=["image"], prob=0.2, mean=0.0, std=0.01),
+        ]
+    transforms += [EnsureTyped(keys=["image", "label"]), ToTensord(keys=["image", "label"])]
+    return Compose(transforms)
 
-        # Resize/crop/pad to fixed spatial size
-        img = self._resize_volume(img, self.spatial_size)
-        # Add channel dimension
-        img_tensor = torch.from_numpy(img[None, ...])  # shape: (1, D, H, W)
 
-        sample = {"image": img_tensor}
+def get_val_transform(
+    spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    spatial_size: Tuple[int, int, int] = (96, 96, 96),
+) -> Compose:
+    """Create a MONAI transform pipeline for validation and testing.
 
-        if not self.is_test:
-            label_path = row["filepath_label"]
-            lab_nii = nib.load(label_path)
-            lab = lab_nii.get_fdata().astype(np.int64)
-            if self.resample_spacing is not None:
-                orig_spacing = np.abs(lab_nii.header.get_zooms()[:3])
-                scale_factors = orig_spacing / np.array(self.resample_spacing)
-                import scipy.ndimage
-                lab = scipy.ndimage.zoom(
-                    lab, zoom=scale_factors, order=0
-                )  # nearest for labels
-            lab = self._resize_volume(lab, self.spatial_size)
-            lab_tensor = torch.from_numpy(lab[None, ...])  # shape: (1, D, H, W)
-            sample["label"] = lab_tensor
-        return sample
+    This pipeline performs only deterministic preprocessing: loading,
+    resampling, intensity scaling, resizing/cropping and conversion to
+    tensors.  No random augmentations are applied.
 
-    @staticmethod
-    def _resize_volume(volume: np.ndarray, target_size: Tuple[int, int, int]) -> np.ndarray:
-        """Center‑crop or pad a 3D volume to the target spatial size.
+    Parameters
+    ----------
+    spacing : tuple of floats
+        Target voxel spacing (mm) for resampling.  Must match the spacing
+        used during training.
+    spatial_size : tuple of ints
+        Desired output size (depth, height, width).
 
-        Parameters
-        ----------
-        volume : np.ndarray
-            Input volume of shape (D, H, W).
-        target_size : Tuple[int, int, int]
-            Desired output size (D, H, W).
-        Returns
-        -------
-        np.ndarray
-            Resized volume of shape ``target_size``.
-        """
-        current_shape = volume.shape
-        out = np.zeros(target_size, dtype=volume.dtype)
-        # Compute cropping or padding indices
-        for i in range(3):
-            excess = current_shape[i] - target_size[i]
-            if excess > 0:
-                # Crop
-                start = excess // 2
-                end = start + target_size[i]
-                slc = slice(start, end)
-                if i == 0:
-                    volume = volume[slc, :, :]
-                elif i == 1:
-                    volume = volume[:, slc, :]
-                else:
-                    volume = volume[:, :, slc]
-                current_shape = volume.shape
-        # After cropping, compute padding
-        pad_sizes = [max(t - s, 0) for s, t in zip(volume.shape, target_size)]
-        pad_before = [p // 2 for p in pad_sizes]
-        pad_after = [p - b for p, b in zip(pad_sizes, pad_before)]
-        out_slice = tuple(
-            slice(b, b + volume.shape[i]) for i, b in enumerate(pad_before)
-        )
-        out[out_slice] = volume
-        return out
+    Returns
+    -------
+    monai.transforms.Compose
+        A composition of transforms for validation or test datasets.
+    """
+    if Compose is None:
+        raise ImportError("MONAI is required to build the transform pipeline.")
+    transforms = [
+        LoadImaged(keys=["image", "label"]),
+        EnsureChannelFirstd(keys=["image", "label"]),
+        Spacingd(keys=["image", "label"], pixdim=spacing, mode=("bilinear", "nearest")),
+        ScaleIntensityRanged(
+            keys=["image"],
+            a_min=0.0,
+            a_max=1.0,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True,
+        ),
+        ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=spatial_size),
+        EnsureTyped(keys=["image", "label"]),
+        ToTensord(keys=["image", "label"]),
+    ]
+    return Compose(transforms)
+
+
+def get_test_transform(
+    spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    spatial_size: Tuple[int, int, int] = (96, 96, 96),
+) -> Compose:
+    """Create a MONAI transform pipeline for inference on unseen data.
+
+    The test transform is identical to the validation transform except
+    that it does not expect a ``label`` key and therefore omits label
+    operations.  If your DataFrame includes a ``filepath_label`` column
+    for a back‑test set, you may use the validation transform instead.
+    """
+    if Compose is None:
+        raise ImportError("MONAI is required to build the transform pipeline.")
+    transforms = [
+        LoadImaged(keys=["image"]),
+        EnsureChannelFirstd(keys=["image"]),
+        Spacingd(keys=["image"], pixdim=spacing, mode="bilinear"),
+        ScaleIntensityRanged(
+            keys=["image"],
+            a_min=0.0,
+            a_max=1.0,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True,
+        ),
+        ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
+        EnsureTyped(keys=["image"]),
+        ToTensord(keys=["image"]),
+    ]
+    return Compose(transforms)
+
+
+def get_dataset(
+    df: pd.DataFrame,
+    is_train: bool,
+    spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    spatial_size: Tuple[int, int, int] = (96, 96, 96),
+    augment: bool = True,
+    is_test: bool = False,
+) -> Dataset:
+    """Create a MONAI dataset with the appropriate transforms.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        The input DataFrame containing filepaths.
+    is_train : bool
+        Whether the dataset will be used for training.  Determines the
+        transform used.
+    spacing : tuple of floats
+        Voxel spacing for resampling.
+    spatial_size : tuple of ints
+        Output volume size.
+    augment : bool, optional
+        When ``is_train`` is ``True``, controls whether random
+        augmentation is added.  Ignored for validation/test datasets.
+    is_test : bool, optional
+        If ``True``, create a dataset without labels (for inference on
+        unlabeled data).  The ``is_train`` flag is ignored in this case.
+
+    Returns
+    -------
+    monai.data.Dataset
+        A dataset yielding dictionaries with keys ``image`` and
+        optionally ``label``.
+    """
+    if Dataset is None:
+        raise ImportError("MONAI must be installed to use get_dataset().")
+    data_list = get_data_list(df, is_test=is_test)
+    if is_test:
+        transform = get_test_transform(spacing=spacing, spatial_size=spatial_size)
+    else:
+        if is_train:
+            transform = get_train_transform(spacing=spacing, spatial_size=spatial_size, augment=augment)
+        else:
+            transform = get_val_transform(spacing=spacing, spatial_size=spatial_size)
+    return Dataset(data=data_list, transform=transform)
 
 
 def create_group_splits(
@@ -184,66 +306,64 @@ def create_group_splits(
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
     """Generate group‑wise k‑fold splits based on the ``ID`` column of a DataFrame.
 
-    This function returns a list of tuples ``(train_idx, val_idx)`` where
-    ``train_idx`` and ``val_idx`` are NumPy arrays of indices into ``df``.
-    The splits are produced by ``GroupKFold`` so that all samples with the
-    same ``ID`` appear in only one of the training or validation sets.
+    This function uses scikit‑learn's ``GroupKFold`` to ensure that all
+    samples belonging to the same subject are placed in the same fold.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        DataFrame containing an ``ID`` column.
+        DataFrame containing an ``ID`` column identifying the subject.
     n_splits : int, optional
-        Number of folds for cross‑validation.  Default is 5.
+        Number of cross‑validation folds.  Default is 5.
     random_state : int, optional
-        Shuffling seed passed to the internal random number generator before
-        splitting.  ``GroupKFold`` itself does not support shuffling, so if
-        you want reproducible splits you should shuffle ``df`` prior to
-        calling this function.  Default is 42.
+        Seed used to shuffle the data before splitting.  Note that
+        ``GroupKFold`` itself does not support shuffling, so the shuffle
+        happens on the DataFrame indices prior to splitting.  Default is 42.
 
     Returns
     -------
     List[Tuple[np.ndarray, np.ndarray]]
-        List of ``(train_idx, val_idx)`` index arrays.
+        A list of tuples ``(train_idx, val_idx)`` containing the indices
+        for each fold.
     """
     if GroupKFold is None:
-        raise RuntimeError(
-            "scikit‑learn must be installed to use create_group_splits()."
-        )
+        raise RuntimeError("scikit‑learn must be installed to create group splits.")
     df_shuffled = df.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
     groups = df_shuffled["ID"].values
     gkf = GroupKFold(n_splits=n_splits)
-    splits = []
+    splits: List[Tuple[np.ndarray, np.ndarray]] = []
     for train_index, val_index in gkf.split(df_shuffled, groups=groups):
         splits.append((train_index, val_index))
     return splits
 
 
 def compute_class_weights(df: pd.DataFrame, num_classes: int = 3) -> np.ndarray:
-    """Compute per‑class weights to mitigate class imbalance.
+    """Compute inverse‑frequency class weights from the label volumes.
 
-    The hippocampi occupy a very small fraction of each MR volume.  This
-    function sums the number of voxels of each label across all segmentations
-    referenced in ``df['filepath_label']`` and computes a weight inversely
-    proportional to the class frequency.  The weights are scaled so that
-    their sum equals the number of classes.
+    This helper iterates over the ``filepath_label`` column of the
+    provided DataFrame, loads each NIfTI label using ``nibabel`` and
+    counts the number of voxels belonging to each class.  It then
+    computes weights inversely proportional to the logarithm of the
+    class frequencies, normalising the weights so that they sum to
+    ``num_classes``.  These weights can be passed to loss functions to
+    mitigate class imbalance.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        DataFrame with a ``filepath_label`` column pointing to NIfTI label files.
+        DataFrame with a ``filepath_label`` column pointing to label
+        volumes.  Rows without labels are ignored.
     num_classes : int, optional
-        Number of segmentation classes (including background).  Default is 3.
+        Total number of segmentation classes (including background).  Default is 3.
 
     Returns
     -------
     np.ndarray
-        Array of shape ``(num_classes,)`` containing the weight for each class.
+        An array of shape ``(num_classes,)`` containing the weight for
+        each class.
     """
     if nib is None:
-        raise RuntimeError(
-            "nibabel must be installed to compute class weights from NIfTI files."
-        )
+        raise RuntimeError("nibabel must be installed to compute class weights.")
     voxel_counts = np.zeros(num_classes, dtype=np.float64)
     for _, row in df.iterrows():
         label_path = row.get("filepath_label")
@@ -252,11 +372,11 @@ def compute_class_weights(df: pd.DataFrame, num_classes: int = 3) -> np.ndarray:
         lab = nib.load(label_path).get_fdata().astype(np.int64)
         for c in range(num_classes):
             voxel_counts[c] += np.sum(lab == c)
-    # Avoid division by zero
+    # Prevent division by zero
     voxel_counts = np.clip(voxel_counts, a_min=1.0, a_max=None)
     frequencies = voxel_counts / np.sum(voxel_counts)
-    # Inverse log weighting; adjust exponent for more or less smoothing
+    # Use inverse log weighting to dampen large class weight differences
     weights = 1.0 / (np.log(1.0 + frequencies))
-    # Normalise so that sum(weights) = num_classes
+    # Normalise so that weights sum to the number of classes
     weights = weights / np.sum(weights) * num_classes
     return weights

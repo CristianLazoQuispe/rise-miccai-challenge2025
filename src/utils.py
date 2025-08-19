@@ -24,19 +24,34 @@ except ImportError:
 
 
 def one_hot(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
-    """Convert a tensor of labels to one‑hot encoding along a new channel axis.
+    """Convert a tensor of integer labels to one‑hot encoding along a new channel axis.
+
+    This helper removes the singleton channel dimension often present on
+    label volumes and uses :func:`torch.nn.functional.one_hot` to
+    construct a one‑hot representation.  The resulting tensor is
+    rearranged to the shape ``(N, C, D, H, W)`` expected by common
+    loss functions.
 
     Parameters
     ----------
     labels : torch.Tensor
-        Tensor of shape ``(N, 1, D, H, W)`` containing integer class labels.
+        Tensor of shape ``(N, 1, D, H, W)`` containing integer class
+        labels.
     num_classes : int
-        Number of classes for the one‑hot representation.
+        Total number of classes in the segmentation.  Must be greater
+        than the maximum label value present in ``labels``.
 
     Returns
     -------
     torch.Tensor
         One‑hot encoded tensor of shape ``(N, num_classes, D, H, W)``.
+
+    Notes
+    -----
+    The returned tensor is placed on the same device as the input
+    ``labels`` and uses the default tensor datatype for one‑hot
+    encodings (usually ``torch.int64``).  If you require a different
+    datatype, call ``to(dtype=...)`` on the result.
     """
     # Remove the channel dimension and apply one_hot; then permute back
     # to (N, D, H, W, C) and finally reorder to (N, C, D, H, W)
@@ -141,6 +156,120 @@ class CombinedLoss(torch.nn.Module):
         return self.dice_weight * dloss + self.ce_weight * celoss
 
 
+def tversky_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.3,
+    beta: float = 0.7,
+    class_weights: Optional[Sequence[float]] = None,
+    gamma: float = 1.0,
+    smooth: float = 1e-5,
+) -> torch.Tensor:
+    """Compute the (focal) Tversky loss for multi‑class segmentation.
+
+    The Tversky index is a generalisation of the Dice coefficient that
+    introduces separate penalties for false positives and false
+    negatives via the ``alpha`` and ``beta`` parameters.  The focal
+    version of the loss raises the complement of the Tversky index to
+    the power ``gamma`` to focus training on harder examples, which is
+    particularly beneficial when segmenting very small structures.
+
+    Parameters
+    ----------
+    logits : torch.Tensor
+        Raw output from the network of shape ``(N, C, D, H, W)``.
+    targets : torch.Tensor
+        Ground truth labels of shape ``(N, 1, D, H, W)``.
+    alpha : float, optional
+        Weight for false positives.  A higher value penalises false
+        positives more strongly.  Default is 0.3.
+    beta : float, optional
+        Weight for false negatives.  A higher value penalises false
+        negatives more strongly.  Default is 0.7.
+    class_weights : sequence of floats, optional
+        Optional per‑class weights applied to the loss.  If
+        ``None``, all classes contribute equally.
+    gamma : float, optional
+        Exponent applied to the Tversky complement to form the focal
+        Tversky loss.  When ``gamma=1``, this reduces to the plain
+        Tversky loss.  Values greater than 1 emphasise hard to
+        segment voxels.  Default is 1.0.
+    smooth : float, optional
+        Smoothing factor added to numerator and denominator to avoid
+        division by zero.  Default is ``1e-5``.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar tensor representing the average focal Tversky loss.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch must be installed to compute the Tversky loss.")
+    num_classes = logits.shape[1]
+    # Convert logits to probabilities
+    probs = F.softmax(logits, dim=1)
+    target_onehot = one_hot(targets, num_classes=num_classes).float()
+    dims = (0, 2, 3, 4)
+    tp = (probs * target_onehot).sum(dim=dims)
+    fp = (probs * (1 - target_onehot)).sum(dim=dims)
+    fn = ((1 - probs) * target_onehot).sum(dim=dims)
+    tversky_index = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
+    # Convert to loss
+    if class_weights is not None:
+        weight_tensor = torch.tensor(class_weights, device=tversky_index.device, dtype=tversky_index.dtype)
+        per_class = torch.pow(1.0 - tversky_index, gamma) * weight_tensor
+        return per_class.sum() / weight_tensor.sum()
+    else:
+        return torch.pow(1.0 - tversky_index, gamma).mean()
+
+
+class FocalTverskyLoss(torch.nn.Module):
+    """PyTorch module for the focal Tversky loss.
+
+    This class wraps :func:`tversky_loss` into a ``torch.nn.Module``
+    compatible interface.  Use this loss when the target structures
+    occupy only a small fraction of the image volume; the focal
+    exponent ``gamma`` down‑weights easy examples and improves
+    sensitivity to small objects.
+
+    Parameters
+    ----------
+    alpha : float, optional
+        Weight for false positives.  Default is 0.3.
+    beta : float, optional
+        Weight for false negatives.  Default is 0.7.
+    gamma : float, optional
+        Focusing exponent; values greater than 1 put more emphasis on
+        misclassified voxels.  Default is 1.33.
+    class_weights : sequence of floats, optional
+        Per‑class weights to mitigate class imbalance.  Default is
+        ``None``.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.3,
+        beta: float = 0.7,
+        gamma: float = 1.33,
+        class_weights: Optional[Sequence[float]] = None,
+    ) -> None:
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.class_weights = class_weights
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        return tversky_loss(
+            logits,
+            targets,
+            alpha=self.alpha,
+            beta=self.beta,
+            class_weights=self.class_weights,
+            gamma=self.gamma,
+        )
+
+
 def compute_dice_per_class(
     preds: torch.Tensor,
     targets: torch.Tensor,
@@ -225,3 +354,77 @@ def hausdorff_distance(
     d1 = directed_hausdorff(pred_points, target_points)[0]
     d2 = directed_hausdorff(target_points, pred_points)[0]
     return max(d1, d2)
+
+
+import torch
+import numpy as np
+from monai.metrics import DiceMetric, HausdorffDistanceMetric, SurfaceDiceMetric
+from monai.metrics.utils import get_surface_distance
+from monai.transforms import AsDiscrete
+
+# ---------------------------
+# Metrics initializers
+# ---------------------------
+
+def get_metrics_3d(device):
+    """
+    Returns a dictionary of 3D medical segmentation metrics
+    including Dice, Hausdorff95, ASSD and Surface Dice.
+    """
+    metrics = {
+        "dice": DiceMetric(include_background=False, reduction="mean", get_not_nans=False),#.to(device),
+        "hd95": HausdorffDistanceMetric(include_background=False, percentile=95, reduction="mean"),#.to(device),
+        "surf_dice": SurfaceDiceMetric(include_background=False, reduction="mean", distance_metric="euclidean",
+                                                   class_thresholds=[1.0]  # for 1 class (foreground)
+                                                   ),#.to(device),
+    }
+    return metrics
+
+
+# ---------------------------
+# Metric computation
+# ---------------------------
+
+def compute_metrics(pred, target, metrics):
+    """
+    Compute all metrics for given prediction and target masks.
+
+    Args:
+        pred (torch.Tensor): predicted segmentation, shape (B, C, H, W, D)
+        target (torch.Tensor): ground truth segmentation, shape (B, C, H, W, D)
+        metrics (dict): dictionary of MONAI metrics from get_metrics_3d()
+
+    Returns:
+        dict: results of all metrics
+    """
+    # binarize predictions and targets
+    pred_discrete = AsDiscrete(threshold=0.5)(pred)
+    target_discrete = AsDiscrete(to_onehot=pred.shape[1])(target)
+
+    results = {}
+    with torch.no_grad():
+        for name, metric in metrics.items():
+            metric.reset()
+            metric(y_pred=pred_discrete, y=target_discrete)
+            results[name] = metric.aggregate().item()
+            metric.reset()
+
+    return results
+
+
+# ---------------------------
+# Example usage inside training
+# ---------------------------
+
+"""
+from utils import get_metrics_3d, compute_metrics
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+metrics = get_metrics_3d(device)
+
+# inside validation loop
+with torch.no_grad():
+    outputs = model(inputs)
+    results = compute_metrics(outputs, labels, metrics)
+    print("Dice:", results["dice"], "HD95:", results["hd95"], "SurfaceDice:", results["surf_dice"])
+"""
