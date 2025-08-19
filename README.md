@@ -21,3 +21,7 @@ From root:
 ```
 python codes/1.download_data.py
 ```
+
+scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/LISAHF0001segprediction.nii.gz .
+
+scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/LISAHF0001segprediction.nii.gz C:\Users\TU_USUARIO\Downloads\
