@@ -27,6 +27,12 @@ scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_m
 scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/LISAHF0001segprediction.nii.gz C:\Users\TU_USUARIO\Downloads\
 
 
+scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_dynunet_02/LISAHF0001segprediction.nii.gz .
+
+
+
+
+
 ```bash
 python train.py \
   --train_csv results/preprocessed_data/task2/df_train_hipp.csv \

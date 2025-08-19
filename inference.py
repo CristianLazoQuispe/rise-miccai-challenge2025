@@ -13,6 +13,20 @@ Example usage:
 ```bash
 python inference.py \
   --test_csv results/preprocessed_data/task2/df_test_hipp.csv \
+  --model_dirs /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_02/fold_0 \
+  --model unest \
+  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_02/
+
+python inference.py \
+  --test_csv results/preprocessed_data/task2/df_test_hipp.csv \
+  --model_dirs /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_dynunet_02/fold_0 \
+  --model dynunet \
+  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_dynunet_02/
+
+  
+
+python inference.py \
+  --test_csv results/preprocessed_data/task2/df_test_hipp.csv \
   --model_dirs /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_02/fold_0,/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_02/fold_1,/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_02/fold_2 \
   --model unest \
   --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_02/
@@ -56,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test_csv", type=str, required=True, help="Path to the CSV file listing test images.")
     # Backwards compatibility: allow a single model directory
     parser.add_argument("--model_dir", type=str, default=None, help="Directory containing a trained model (best_model.pth).")
-    parser.add_argument("--model", type=str, default=None, choices=["unest", "segresnet", "autoencoder"], help="Architecture used by the single model.")
+    parser.add_argument("--model", type=str, default=None, choices=["unest", "segresnet", "dynunet"], help="Architecture used by the single model.")
     # New: support multiple model directories and architectures
     parser.add_argument(
         "--model_dirs",

@@ -128,7 +128,7 @@ class UNesT133Adapter(nn.Module):
         if bottleneck and bottleneck > 0:
             self.adapter = nn.Sequential(
                 nn.Conv3d(133, bottleneck, kernel_size=1, bias=False),
-                nn.GroupNorm(num_groups=1, num_channels=bottleneck),
+                nn.GroupNorm(num_groups=8, num_channels=bottleneck),
                 nn.ReLU(inplace=True),
                 nn.Dropout3d(p=dropout) if dropout > 0 else nn.Identity(),
                 nn.Conv3d(bottleneck, num_classes, kernel_size=1, bias=True),
