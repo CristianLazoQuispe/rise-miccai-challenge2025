@@ -57,6 +57,8 @@ from src.models import get_model
 from src.utils import compute_dice_per_class
 import tqdm
 
+import nibabel as nib
+from nibabel.processing import resample_from_to
 
 def parse_args() -> argparse.Namespace:
     """Parse arguments for inference.
@@ -218,6 +220,7 @@ def main() -> None:
         orig_affine = orig_img_nii.affine
         current_size = pred_labels.shape
         zoom_factors = [o / c for o, c in zip(orig_shape, current_size)]
+        """
         try:
             import scipy.ndimage
             pred_resized = scipy.ndimage.zoom(pred_labels, zoom=zoom_factors, order=0)
@@ -227,6 +230,8 @@ def main() -> None:
                     "scipy.ndimage is required to rescale prediction to original shape."
                 )
             pred_resized = pred_labels
+        """
+        pred_resized = pred_labels
         pred_resized = pred_resized.astype(np.uint8)
         # Construct output filename following challenge spec
         subject_id = row["ID"]
@@ -235,7 +240,9 @@ def main() -> None:
         out_fname = f"LISAHF{numeric_id_str}segprediction.nii.gz"
         out_path = os.path.join(args.output_dir, out_fname)
         pred_nii = nib.Nifti1Image(pred_resized, affine=orig_affine)
+        pred_nii = resample_from_to(pred_nii, orig_img_nii, order=0)  # nearest neighbour
         nib.save(pred_nii, out_path)
+
         pbar.set_postfix({"subject": str(subject_id)})
     # If evaluating, summarise and report mean Dice
     if args.eval and dice_scores_all:
