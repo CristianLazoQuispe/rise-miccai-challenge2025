@@ -29,7 +29,9 @@ scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_m
 
 scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_dynunet_02/LISAHF0001segprediction.nii.gz .
 
+scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_03_train/LISAHF0001segprediction.nii.gz .
 
+scp -r va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_03_train/ .
 
 
 

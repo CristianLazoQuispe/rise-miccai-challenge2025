@@ -360,12 +360,12 @@ final_metrics = train_and_evaluate(
     df=df,
     num_folds=5,
     num_epochs=200,         # ajusta según tus recursos
-    model_name="unest",      # o "unetr" si quieres transformer
+    model_name="unet",      # o "unetr" si quieres transformer
     batch_size=4,           # 1 para sliding_window, puedes aumentar si tu GPU lo permite
     lr=1e-4,
     weight_decay=1e-5,
-    device="cuda:5",
-    root_dir="/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_03_test/fold_models"
+    device="cuda:4",
+    root_dir="/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unet_03_test/fold_models"
 )
 print("Métricas finales:", final_metrics)
 
