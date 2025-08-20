@@ -12,6 +12,12 @@ Example usage:
 
 ```bash
 python inference.py \
+  --test_csv results/preprocessed_data/task2/df_train_hipp.csv \
+  --model_dirs /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_02/fold_0 \
+  --model unest \
+  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_02_train/
+
+python inference.py \
   --test_csv results/preprocessed_data/task2/df_test_hipp.csv \
   --model_dirs /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_02/fold_0 \
   --model unest \
@@ -187,64 +193,100 @@ def main() -> None:
         model.eval()
         models_list.append(model)
         print(f"Loaded model '{name}' from {ckpt_path}")
+    # ------------------------------------------------------------------
     # Inference loop with optional evaluation
+    #
+    # We perform inference on each test case using MONAI's sliding_window_inference
+    # to avoid resizing the entire volume.  The test dataset only normalises
+    # spacing and intensity, preserving the original spatial dimensions.  We
+    # process the image in patches of size ``args.spatial_size`` and combine
+    # them to produce a full‑resolution prediction.  We then use
+    # ``Invertd`` to invert the preprocessing transforms based on the stored
+    # metadata, ensuring perfect alignment with the original CISO volume.
+
+    # Import MONAI components for inference
+    try:
+        from monai.inferers import sliding_window_inference
+        from monai.transforms import Compose, Activationsd, AsDiscreted, Invertd
+        from monai.data.meta_tensor import MetaTensor
+    except ImportError:
+        raise RuntimeError(
+            "MONAI is required for sliding window inference. Please install MONAI to use this script."
+        )
+
+    # Compose post transforms for inversion: apply softmax, invert using the
+    # original image transforms, and discretise predictions via argmax.  The
+    # inversion uses the metadata stored in the MetaTensor to reconstruct
+    # original affine/shape without requiring additional spacing or zoom.
+    pre_transform = test_ds.transform
+    post_transforms = Compose([
+        Activationsd(keys="pred", softmax=True),
+        Invertd(
+            keys="pred",
+            transform=pre_transform,
+            orig_keys="image",
+            meta_keys=None,
+            orig_meta_keys=None,
+            nearest_interp=False,
+            to_tensor=True,
+        ),
+        AsDiscreted(keys="pred", argmax=True),
+    ])
+
     dice_scores_all: list[np.ndarray] = []
     pbar = tqdm.tqdm(test_loader, desc="Inference", total=len(test_loader), dynamic_ncols=True)
     for idx, sample in enumerate(pbar):
-        img_tensor = sample["image"].to(device)
-        # Average predictions from all models
-        probs_sum = None
+        # Access the image as a MetaTensor; keep metadata for inversion
+        img_meta: MetaTensor = sample["image"]  # type: ignore
+        img_tensor = img_meta.to(device)
+        # Sum logits from all models
+        logits_sum = None
         with torch.no_grad():
             for model in models_list:
                 with torch.cuda.amp.autocast(enabled=use_cuda):
-                    logits = model(img_tensor)
-                    probs = torch.softmax(logits, dim=1)
-                probs_sum = probs if probs_sum is None else probs_sum + probs
-            avg_probs = probs_sum / len(models_list)
-            pred_labels = torch.argmax(avg_probs, dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
-        # For evaluation (if labels exist and requested), compute Dice
+                    logits = sliding_window_inference(
+                        inputs=img_tensor,
+                        roi_size=tuple(args.spatial_size),
+                        sw_batch_size=4,
+                        predictor=model,
+                        overlap=0.5,
+                        mode="gaussian",
+                    )
+                logits_sum = logits if logits_sum is None else logits_sum + logits
+        avg_logits = logits_sum / len(models_list)
+
+        # Evaluation (Dice) if labels provided
         if args.eval and ("filepath_label" in df.columns):
             labels_tensor = sample.get("label")
             if labels_tensor is not None:
                 labels_tensor = labels_tensor.to(device)
-                # We need logits for compute_dice_per_class.  Use avg_probs converted to logits via logit transform
-                # but compute_dice_per_class uses argmax, so we can wrap avg_probs as logits
-                avg_logits = torch.log(avg_probs + 1e-8)
                 dice = compute_dice_per_class(avg_logits, labels_tensor, num_classes=3)
                 dice_scores_all.append(dice)
-        # Rescale prediction back to original shape
-        row = df.iloc[idx]
-        img_path = row["filepath"]
-        orig_img_nii = nib.load(img_path)
-        orig_shape = orig_img_nii.shape
-        orig_affine = orig_img_nii.affine
-        current_size = pred_labels.shape
-        zoom_factors = [o / c for o, c in zip(orig_shape, current_size)]
-        """
-        try:
-            import scipy.ndimage
-            pred_resized = scipy.ndimage.zoom(pred_labels, zoom=zoom_factors, order=0)
-        except ImportError:
-            if current_size != orig_shape:
-                raise RuntimeError(
-                    "scipy.ndimage is required to rescale prediction to original shape."
-                )
-            pred_resized = pred_labels
-        """
-        pred_resized = pred_labels
-        pred_resized = pred_resized.astype(np.uint8)
+
+        # Prepare prediction MetaTensor with same metadata as image
+        logits_cpu = avg_logits.cpu().squeeze(0)
+        pred_meta = MetaTensor(logits_cpu, meta=img_meta.meta.copy())  # type: ignore
+        pred_dict = {"image": img_meta.cpu(), "pred": pred_meta}
+        # Apply post transforms: softmax, invert transforms and argmax
+        pred_dict = post_transforms(pred_dict)
+        pred_labels = pred_dict["pred"].cpu().numpy().astype(np.uint8)
+        # Retrieve original affine for saving
+        meta = pred_dict["image"].meta
+        orig_affine = meta.get("original_affine", meta.get("affine"))
+
         # Construct output filename following challenge spec
+        row = df.iloc[idx]
         subject_id = row["ID"]
         numeric_id = re.findall(r"\d+", str(subject_id))
         numeric_id_str = numeric_id[-1] if numeric_id else str(subject_id)
         out_fname = f"LISAHF{numeric_id_str}segprediction.nii.gz"
         out_path = os.path.join(args.output_dir, out_fname)
-        pred_nii = nib.Nifti1Image(pred_resized, affine=orig_affine)
-        pred_nii = resample_from_to(pred_nii, orig_img_nii, order=0)  # nearest neighbour
+        # Save prediction as NIfTI in the original space
+        pred_nii = nib.Nifti1Image(pred_labels[0], affine=orig_affine)
         nib.save(pred_nii, out_path)
-
         pbar.set_postfix({"subject": str(subject_id)})
-    # If evaluating, summarise and report mean Dice
+
+    # Summarise evaluation results
     if args.eval and dice_scores_all:
         dice_array = np.stack(dice_scores_all, axis=0)
         mean_dice_per_class = dice_array.mean(axis=0)

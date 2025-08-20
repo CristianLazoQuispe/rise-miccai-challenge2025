@@ -39,6 +39,12 @@ from typing import List, Tuple, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from monai.transforms import RandRotated, RandZoomd, Rand3DElasticd
+from monai.transforms import RandBiasFieldd, RandHistogramShiftd, RandAdjustContrastd
+from monai.transforms import RandCoarseDropoutd
+
+
+
 
 try:
     # Core MONAI components for data loading and transforms
@@ -165,14 +171,38 @@ def get_train_transform(
                 keys=["image", "label"],
                 prob=0.3,
                 rotate_range=(0.1, 0.1, 0.1),
-                translate_range=(5, 5, 5),
+                translate_range=(20, 20,10),  # traslación máx en voxeles en (x,y,z)
                 scale_range=(0.1, 0.1, 0.1),
                 mode=("bilinear", "nearest"),
                 padding_mode="border",
             ),
             RandGaussianNoised(keys=["image"], prob=0.2, mean=0.0, std=0.01),
+
+            RandRotated(keys=["image", "label"], prob=0.2, range_x=0.26, range_y=0.26, range_z=0.26),  # ±15°
+            RandZoomd(keys=["image", "label"], prob=0.2, min_zoom=0.9, max_zoom=1.1, mode=("trilinear", "nearest")),
+            Rand3DElasticd(keys=["image", "label"], prob=0.1, sigma_range=(5,7), magnitude_range=(50,100), mode=("bilinear", "nearest")),
+
+            RandBiasFieldd(keys=["image"], prob=0.2, coeff_range=(0.0, 0.5)),
+            RandHistogramShiftd(keys=["image"], prob=0.3, num_control_points=5, shift_range=(-0.05, 0.05)),
+            RandAdjustContrastd(keys=["image"], prob=0.3, gamma=(0.7, 1.5)),
+
+            RandCoarseDropoutd(
+                keys=["image", "label"],
+                prob=0.15,
+                holes=2,
+                spatial_size=(32, 32, 32),
+                fill_value=0,
+                max_holes=5
+            ),
+
         ]
-    transforms += [EnsureTyped(keys=["image", "label"]), ToTensord(keys=["image", "label"])]
+    # Convert to MetaTensor and preserve metadata for inverse transforms. Do not
+    # call ToTensord here, as it strips metadata. DataLoader will convert
+    # to tensors automatically.
+    # Convert to MetaTensor and preserve metadata for inverse transforms. Do not call
+    # ToTensord here, as it strips metadata. The DataLoader will handle
+    # conversion to torch.Tensor. Returning Compose once is sufficient.
+    transforms += [EnsureTyped(keys=["image", "label"], track_meta=True)]
     return Compose(transforms)
 
 
@@ -214,8 +244,7 @@ def get_val_transform(
             clip=True,
         ),
         ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=spatial_size),
-        EnsureTyped(keys=["image", "label"]),
-        ToTensord(keys=["image", "label"]),
+        EnsureTyped(keys=["image", "label"], track_meta=True),
     ]
     return Compose(transforms)
 
@@ -233,6 +262,9 @@ def get_test_transform(
     """
     if Compose is None:
         raise ImportError("MONAI is required to build the transform pipeline.")
+    # Inference transform: load image, ensure channel, resample to specified spacing,
+    # normalize intensities, and keep metadata. We avoid padding/cropping here and
+    # let sliding_window_inference handle patch-wise processing on the full volume.
     transforms = [
         LoadImaged(keys=["image"]),
         EnsureChannelFirstd(keys=["image"]),
@@ -245,9 +277,8 @@ def get_test_transform(
             b_max=1.0,
             clip=True,
         ),
-        ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
-        EnsureTyped(keys=["image"]),
-        ToTensord(keys=["image"]),
+        # Track metadata for inversion. DataLoader will convert to tensors automatically.
+        EnsureTyped(keys=["image"], track_meta=True),
     ]
     return Compose(transforms)
 
