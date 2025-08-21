@@ -116,12 +116,12 @@ def get_train_transforms_lite():
         CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
         Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
         ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
-        #Resized(keys=["image","label"], spatial_size=SPATIAL_SIZE, mode=("trilinear","nearest")),
+        #
         # ---- Reescalado correcto ----
         Resized(keys=["image"], spatial_size=SPATIAL_SIZE,
                 mode="trilinear", align_corners=False, anti_aliasing=True),
         Resized(keys=["label"], spatial_size=SPATIAL_SIZE,
-                mode="nearest", anti_aliasing=False),        
+                mode="nearest", anti_aliasing=False),         
         # Ejemplo de augmentación: flips y rotaciones aleatorias
         OneOf([
             RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=1),  #  si usar
@@ -129,19 +129,22 @@ def get_train_transforms_lite():
             RandRotate90d(keys=["image","label"], prob=0.5, max_k=3), # si usar
         ]),
 
-        RandRotated( # si usar RandRotated,RandAffined
-            keys=["image","label"], prob=0.999,
-            range_z=(-0.8, 0.8),
-            mode=("bilinear","nearest")),
-        
-        RandAffined( # si usar
-            keys=["image","label"], prob=0.999,
-            rotate_range=(0.4,0,0),
-            translate_range=(0, 20 , 20),
-            scale_range=(0.10,0.10,0.10),
-            padding_mode="zeros",
-            mode=("bilinear","nearest"),
-        ),
+
+        OneOf([
+            RandRotated( # si usar RandRotated,RandAffined
+                keys=["image","label"], prob=0.5,
+                range_z=(-0.8, 0.8),
+                mode=("bilinear","nearest")),
+            
+            RandAffined( # si usar
+                keys=["image","label"], prob=0.5,
+                rotate_range=(0.4,0,0),
+                translate_range=(0, 20 , 20),
+                scale_range=(0.10,0.10,0.10),
+                padding_mode="zeros",
+                mode=("bilinear","nearest"),
+            ),
+        ]),
 
         OneOf([
             RandBiasFieldd(keys=["image"], prob=0.5, coeff_range=(0.0,0.05)),
@@ -162,12 +165,13 @@ def get_train_transforms_hard():
         CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
         Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
         ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
-        #Resized(keys=["image","label"], spatial_size=SPATIAL_SIZE, mode=("trilinear","nearest")),
+        #
         # ---- Reescalado correcto ----
         Resized(keys=["image"], spatial_size=SPATIAL_SIZE,
                 mode="trilinear", align_corners=False, anti_aliasing=True),
         Resized(keys=["label"], spatial_size=SPATIAL_SIZE,
-                mode="nearest", anti_aliasing=False),        
+                mode="nearest", anti_aliasing=False),   
+                
         # Ejemplo de augmentación: flips y rotaciones aleatorias
         OneOf([
             RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=0),  #  si usar
@@ -175,20 +179,22 @@ def get_train_transforms_hard():
             RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=2),  # si usar
             RandRotate90d(keys=["image","label"], prob=0.5, max_k=3), # si usar
         ]),
+        OneOf([
 
-        RandRotated( # si usar RandRotated,RandAffined
-            keys=["image","label"], prob=0.999,
-            range_z=(-0.8, 0.8),
-            mode=("bilinear","nearest")),
-        
-        RandAffined( # si usar
-            keys=["image","label"], prob=0.999,
-            rotate_range=(0.4,0.4,0.4),
-            translate_range=(20, 20 , 20),
-            scale_range=(0.10,0.10,0.10),
-            padding_mode="zeros",
-            mode=("bilinear","nearest"),
-        ),
+            RandRotated( # si usar RandRotated,RandAffined
+                keys=["image","label"], prob=0.5,
+                range_z=(-0.8, 0.8),
+                mode=("bilinear","nearest")),
+            
+            RandAffined( # si usar
+                keys=["image","label"], prob=0.5,
+                rotate_range=(0.4,0.4,0.4),
+                translate_range=(20, 20 , 20),
+                scale_range=(0.10,0.10,0.10),
+                padding_mode="zeros",
+                mode=("bilinear","nearest"),
+            ),
+        ]),
 
         OneOf([
             RandBiasFieldd(keys=["image"], prob=0.5, coeff_range=(0.0,0.05)),
@@ -209,7 +215,7 @@ def get_val_transforms():
         CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
         Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
         ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
-        #Resized(keys=["image","label"], spatial_size=SPATIAL_SIZE, mode=("trilinear","nearest")),
+        #
         # ---- Reescalado correcto ----
         Resized(keys=["image"], spatial_size=SPATIAL_SIZE,
                 mode="trilinear", align_corners=False, anti_aliasing=True),
@@ -563,10 +569,20 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
     print(f"Total samples: {len(df)} | Unique IDs: {len(list_ids)}")
     #train test split of IDs 10% of list_ids
     list_ids_train, list_ids_backtest = train_test_split(list_ids, test_size=0.1, random_state=42)
-    df_backtest = df[(df["ID"].isin(list_ids_backtest))&(df["source_label"] == "HF_hipp")].reset_index(drop=True)
-    # df_train: all df minus the selected backtest HF_hipp samples
-    df_train = df[~df.filename_label.isin(df_backtest.filename_label)].reset_index(drop=True)
+    df_backtest = df[(df["ID"].isin(list_ids_backtest))].reset_index(drop=True).copy()
+    df_train    = df[~(df["ID"].isin(list_ids_backtest))].reset_index(drop=True).copy()
     print(f"Total samples: {len(df)} | Train samples: {len(df_train)} | Backtest samples: {len(df_backtest)}")
+
+    ids_train = set(df_train["ID"])
+    ids_val = set(df_backtest["ID"])
+    ids_comunes = ids_train.intersection(ids_val)
+    print(f"Train    size: {len(df_train)}")
+    print(f"BackTest size:   {len(df_backtest)}")
+    print(f"IDs en común (data leakage): {len(ids_comunes)}")
+    if len(ids_comunes) > 0:
+        print(f"IDs duplicados: {list(ids_comunes)}")
+
+
     df = df_train
     test_ds   = MRIDataset3D(df_backtest,   transform=get_val_transforms())
     test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
@@ -624,6 +640,8 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
         print(f"IDs en común (data leakage): {len(ids_comunes)}")
         if len(ids_comunes) > 0:
             print(f"IDs duplicados: {list(ids_comunes)}")
+    
+        #raise
 
     
         train_ds = MRIDataset3D(df_train_fold, transform=get_train_transforms_lite() if aug_method=="lite" else get_train_transforms_hard())
@@ -824,7 +842,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
 # Entrenamiento y evaluación con UNet
 """
     UNET NO CONVERGE , DIFICIL DE ENTRENAR FROM SCRATCH, MEJOR CON PRETRAINED
-    python training.py --model_name=unet --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unet_mixup_lite --lr=1e-4 --weight_decay=1e-5 --early_stopping_patience=50 
+    python training.py --model_name=unet --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unet_mixup_lite --lr=1e-4 --weight_decay=1e-5 --early_stopping_patience=60 
 
     
     python training.py --model_name=unest --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unest_mixup_lite --lr=1e-4 --weight_decay=1e-5
@@ -849,7 +867,7 @@ def parse_args():
     parser.add_argument('--model_name', type=str, default="swinunetr", choices=["swinunetr", "unet","segresnet", "unest"],
                         help="Model architecture to use")
     parser.add_argument('--batch_size', type=int, default=4, help="Batch size for training")
-    parser.add_argument('--early_stopping_patience', type=int, default=50, help="Batch size for training")
+    parser.add_argument('--early_stopping_patience', type=int, default=60, help="Batch size for training")
     parser.add_argument('--experiment_name', type=str, default="base", help="Batch size for training")
     parser.add_argument('--scheduler_patience', type=int, default=5, help="scheduler_patience")
 
