@@ -170,13 +170,204 @@ def create_model(model_name="unet",device="cuda:5"):
     elif model_name.lower() == "unest":
         return get_model(name=model_name, num_classes=3, device=device)
 
+    elif model_name.lower() == "swinunetr":
+        from monai.networks.nets import SwinUNETR
+        from huggingface_hub import hf_hub_download
+        """
+        model = SwinUNETR(in_channels=1, out_channels=14, feature_size=48, use_checkpoint=True)
+        # 📦 Descargar pesos preentrenados
+        model_path = hf_hub_download(
+            repo_id="MONAI/swin_unetr_btcv_segmentation",
+            filename="models/model.pt",
+            local_dir="/data/cristian/projects/med_data/rise-miccai/pretrained_models/swin_unetr_btcv_segmentation/",
+            local_dir_use_symlinks=False
+        )
+
+        # ✅ Cargar directamente el state_dict (no usar load_from aquí)
+        state_dict = torch.load(model_path, map_location="cpu")
+        model.load_state_dict(state_dict)
+        """
+        import torch
+        import torch.nn as nn
+        from monai.networks.nets import SwinUNETR
+        from huggingface_hub import hf_hub_download
+
+
+        class AdaptedSwinUNETR(nn.Module):
+            def __init__(
+                self,
+                img_size=(96, 96, 96),
+                in_channels=1,
+                num_classes=3,
+                pretrained=True,
+                freeze_stage=0,  # 0: none, 1: freeze all, 2: freeze encoder only
+                bottleneck=32,
+                use_checkpoint=True,
+                repo_id="MONAI/swin_unetr_btcv_segmentation",
+                filename="models/model.pt",
+                cache_dir="/data/cristian/projects/med_data/rise-miccai/pretrained_models/swin_unetr_btcv_segmentation/",
+                device="cuda:0",
+            ):
+                super().__init__()
+
+                # Backbone con salida original (14 clases BTCV)
+                self.backbone = SwinUNETR(
+                    #img_size=img_size,
+                    in_channels=in_channels,
+                    out_channels=14,  # Pretrained
+                    feature_size=48,
+                    use_checkpoint=use_checkpoint,
+                )
+
+                if pretrained:
+                    ckpt_path = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        local_dir=cache_dir,
+                        local_dir_use_symlinks=False,
+                    )
+                    state_dict = torch.load(ckpt_path, map_location="cpu")
+                    self.backbone.load_state_dict(state_dict)
+                    print("Cargados pesos preentrenados desde:", ckpt_path)
+
+                # ❄️ Freeze encoder si se requiere (solo backbone, no head)
+                # 🔁 Fijar pesos si se requiere
+                if freeze_stage == 1:
+                    for param in self.backbone.parameters():
+                        param.requires_grad = False
+                elif freeze_stage == 2:
+                    for name, param in self.backbone.named_parameters():
+                        if "decoder" not in name and "up" not in name and "out" not in name:
+                            print("freeze param:", name)
+                            param.requires_grad = False
+
+                # 🎯 Adapter elegante con bottleneck
+                self.adapter = nn.Sequential(
+                    nn.Conv3d(14, bottleneck, kernel_size=1, bias=False),
+                    nn.GroupNorm(num_groups=8, num_channels=bottleneck),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout3d(p=0.1),
+                    nn.Conv3d(bottleneck, num_classes, kernel_size=1, bias=True)
+                )
+
+                self.to(device)
+
+            def forward(self, x):
+                x = self.backbone(x)  # [B, 14, D, H, W]
+                x = self.adapter(x)   # [B, 3, D, H, W]
+                return x
+
+
+        model = AdaptedSwinUNETR(
+                img_size=(96, 96, 96),
+                in_channels=1,
+                num_classes=3,
+                freeze_stage=0,  # Puedes controlar qué congelar (0: nada, 1: todo, 2: encoder NO FUNCIONO)
+                pretrained=True,
+                device=device,
+            )
+
+        return model
+
+    elif model_name.lower() == "segresnet":
+        from monai.networks.nets import SegResNet
+        from huggingface_hub import hf_hub_download
+        """
+        model = SegResNet(spatial_dims=3, in_channels=1, out_channels=105, init_filters=32, blocks_down=[1,2,2,4])
+        # 📦 Descargar pesos preentrenados
+        model_path = hf_hub_download(
+            repo_id="MONAI/wholeBody_ct_segmentation",
+            filename="models/model.pt",
+            local_dir="/data/cristian/projects/med_data/rise-miccai/pretrained_models/wholeBody_ct_segmentation/",
+            local_dir_use_symlinks=False
+        )
+        # ✅ Cargar directamente el state_dict (no usar load_from aquí)
+        state_dict = torch.load(model_path, map_location="cpu")
+        model.load_state_dict(state_dict)
+        """
+        import torch
+        import torch.nn as nn
+        from monai.networks.nets import SegResNet
+        from huggingface_hub import hf_hub_download
+
+
+        class AdaptedSegResNetV2(nn.Module):
+            def __init__(
+                self,
+                pretrained=True,
+                repo_id="MONAI/wholeBody_ct_segmentation",
+                filename="models/model.pt",
+                cache_dir="/data/cristian/projects/med_data/rise-miccai/pretrained_models/wholeBody_ct_segmentation/",
+                freeze_stage=0,  # 0: none, 1: freeze all, 2: freeze encoder only
+                bottleneck=32,
+                num_classes=3,
+                device="cuda:0",
+            ):
+                super().__init__()
+
+                # Backbone con salida original (105 clases del modelo preentrenado)
+                self.backbone = SegResNet(
+                    spatial_dims=3,
+                    in_channels=1,
+                    out_channels=105,
+                    init_filters=32,
+                    blocks_down=[1, 2, 2, 4],
+                )
+
+                if pretrained:
+                    ckpt_path = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        local_dir=cache_dir,
+                        local_dir_use_symlinks=False,
+                    )
+                    state_dict = torch.load(ckpt_path, map_location="cpu")
+                    self.backbone.load_state_dict(state_dict)
+                    print("Cargados pesos preentrenados desde:", ckpt_path)
+
+                # 🔁 Fijar pesos si se requiere
+                if freeze_stage == 1:
+                    for param in self.backbone.parameters():
+                        param.requires_grad = False
+                elif freeze_stage == 2:
+                    for name, param in self.backbone.named_parameters():
+                        if "decoder" not in name and "upsample" not in name:
+                            print("freeze param:", name)
+                            param.requires_grad = False
+
+                # 🔄 Adapter más sofisticado que simple conv
+                self.adapter = nn.Sequential(
+                    nn.Conv3d(105, bottleneck, kernel_size=1, bias=False),
+                    nn.GroupNorm(num_groups=8, num_channels=bottleneck),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout3d(p=0.1),
+                    nn.Conv3d(bottleneck, num_classes, kernel_size=1, bias=True)
+                )
+
+                self.to(device)
+
+            def forward(self, x):
+                x = self.backbone(x)
+                x = self.adapter(x)
+                return x
+
+
+        model = AdaptedSegResNetV2(
+                pretrained=True,
+                freeze_stage=0,  # Puedes controlar qué congelar (0: nada, 1: todo, 2: encoder NO FUNCIONO)
+                bottleneck=32,
+                num_classes=3,
+                device=device
+            )
+    
+        return model
     else:
         raise ValueError(f"Modelo no soportado: {model_name}")
 
 ################################################################################
 # ENTRENAMIENTO CON 5 FOLDS
 ################################################################################
-def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name="unet",
+def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name="unet",early_stopping_patience=50,
                        batch_size=1, lr=1e-4, weight_decay=1e-5, root_dir="./models",device = "cuda:5"):
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     kf = KFold(n_splits=num_folds, shuffle=True, random_state=42)
@@ -202,7 +393,9 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
         best_dice = 0.0
         fold_dir = os.path.join(root_dir, f"fold_{fold+1}")
         os.makedirs(fold_dir, exist_ok=True)
-
+        
+        early_stopping_counter = 0
+        #early_stopping_patience = 50  # detener si no hay mejora en 10
         for epoch in range(num_epochs):
             model.train()
             epoch_loss = 0
@@ -283,10 +476,17 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
 
                 # checkpoint: guarda si supera mejor dice promedio
                 if dice_avg > best_dice:
+                    early_stopping_counter = 0  # reset counter si hay mejora
                     best_dice = dice_avg
                     torch.save(model.state_dict(), os.path.join(fold_dir, "best_model.pth"))
-                    print(f"Nuevo mejor modelo guardado - Avg Dice: {best_dice:.4f}")
-
+                    print(f"Nuevo mejor modelo guardado - Avg Dice: {best_dice:.4f}",os.path.join(fold_dir, "best_model.pth"))
+                else:
+                    early_stopping_counter += 1
+                    if early_stopping_counter >= early_stopping_patience:
+                        print(f"No hay mejora en {early_stopping_patience} epochs. Deteniendo entrenamiento.")
+                        break
+            #else:
+            #    print("No se pudieron calcular métricas de validación (posiblemente máscaras vacías).")
         # tras entrenamiento, evaluamos todo el fold (best checkpoint)
         # cargamos mejor modelo
         model.load_state_dict(torch.load(os.path.join(fold_dir, "best_model.pth")))
@@ -346,38 +546,126 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
 # %%
 
 
-# %%
-# Carga tu CSV con rutas de imágenes y máscaras
-# Debe tener columnas: 'filepath' y 'filepath_label'
-csv_path = "results/preprocessed_data/task2/df_train_hipp.csv"
-df = pd.read_csv(csv_path)
-df.head()
 
 # %%
 
 # Entrenamiento y evaluación con UNet
+"""
 final_metrics = train_and_evaluate(
     df=df,
     num_folds=5,
-    num_epochs=200,         # ajusta según tus recursos
-    model_name="unet",      # o "unetr" si quieres transformer
+    num_epochs=1000,         # ajusta según tus recursos
+    model_name="unest",      # o "unetr" si quieres transformer
     batch_size=4,           # 1 para sliding_window, puedes aumentar si tu GPU lo permite
     lr=1e-4,
     weight_decay=1e-5,
-    device="cuda:4",
-    root_dir="/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unet_03_test/fold_models"
+    device="cuda:5",
+    root_dir="/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_04_test/fold_models"
 )
-print("Métricas finales:", final_metrics)
-
-# %%
-print("Métricas finales:", final_metrics)
-
-# %%
-print("hello")
-
-# %%
 
 
+final_metrics = train_and_evaluate(
+    df=df,
+    num_folds=5,
+    num_epochs=1000,         # ajusta según tus recursos
+    model_name="swinunetr",      # o "unetr" si quieres transformer
+    batch_size=4,           # 1 para sliding_window, puedes aumentar si tu GPU lo permite
+    lr=1e-4,
+    weight_decay=1e-5,
+    device="cuda:3",
+    root_dir="/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_swinunetr_04_test/fold_models"
+)
+
+final_metrics = train_and_evaluate(
+    df=df,
+    num_folds=5,
+    num_epochs=1000,         # ajusta según tus recursos
+    model_name="unest",      # o "unetr" si quieres transformer
+    batch_size=4,           # 1 para sliding_window, puedes aumentar si tu GPU lo permite
+    lr=1e-4,
+    weight_decay=1e-5,
+    device="cuda:5",
+    root_dir="/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_04_test/fold_models"
+)
+
+
+final_metrics = train_and_evaluate(
+    df=df,
+    num_folds=5,
+    num_epochs=1000,         # ajusta según tus recursos
+    model_name="swinunetr",      # o "unetr" si quieres transformer
+    batch_size=4,           # 1 para sliding_window, puedes aumentar si tu GPU lo permite
+    lr=1e-4,
+    weight_decay=1e-5,
+    device="cuda:3",
+    root_dir="/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_swinunetr_04_test/fold_models"
+)
+
+
+
+    num_folds=5,
+    num_epochs=1000,         # ajusta según tus recursos
+    model_name="swinunetr",      # o "unetr" si quieres transformer
+    batch_size=4,           # 1 para sliding_window, puedes aumentar si tu GPU lo permite
+    lr=1e-4,
+    weight_decay=1e-5,
+    device="cuda:3",
+    root_dir="/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_swinunetr_04_test/fold_models"
+
+
+    python training.py --model_name=swinunetr --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_swinunetr_04_test/fold_models
+
+    python training.py --model_name=segresnet --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_segresnet_04_test/fold_models --early_stopping_patience=50
+    
+"""
+
+
+
+
+import argparse
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train 3D segmentation model for LISA Challenge")
+
+    parser.add_argument('--model_name', type=str, default="swinunetr", choices=["swinunetr", "unetr","segresnet", "unest"],
+                        help="Model architecture to use")
+    parser.add_argument('--batch_size', type=int, default=4, help="Batch size for training")
+    parser.add_argument('--early_stopping_patience', type=int, default=50, help="Batch size for training")
+    
+    parser.add_argument('--num_epochs', type=int, default=1000, help="Number of training epochs")
+    parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate")
+    parser.add_argument('--weight_decay', type=float, default=1e-5, help="Weight decay (L2 regularization)")
+    parser.add_argument('--device', type=str, default="cuda:0", help="Device to use for training")
+    parser.add_argument('--num_folds', type=int, default=5, help="Number of cross-validation folds")
+    parser.add_argument('--root_dir', type=str, required=True, help="Directory to save models and logs")
+
+    return parser.parse_args()
+
+if __name__ == "__main__":
+    args = parse_args()
+
+
+    # %%
+    # Carga tu CSV con rutas de imágenes y máscaras
+    # Debe tener columnas: 'filepath' y 'filepath_label'
+    csv_path = "results/preprocessed_data/task2/df_train_hipp.csv"
+    df = pd.read_csv(csv_path)
+    df.head()
+
+    final_metrics = train_and_evaluate(
+        df=df,
+        num_folds=args.num_folds,
+        num_epochs=args.num_epochs,
+        model_name=args.model_name,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        device=args.device,
+        root_dir=args.root_dir
+    )
+
+    print("Métricas finales:", final_metrics)
+    print("hello")
 # %%
 
 
