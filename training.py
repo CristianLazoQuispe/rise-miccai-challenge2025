@@ -535,9 +535,12 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
     use_wandb = bool(os.getenv('WANDB_API_KEY')) and bool(os.getenv('PROJECT_WANDB'))
 
     # Remove 10% of HF_hipp samples from df for backtesting, keep the rest for training
-    df_hipp = df[df["source_label"] == "HF_hipp"].reset_index(drop=True)
-    df_hipp_train, df_backtest = train_test_split(df_hipp, test_size=0.1, random_state=42)
-    df_backtest = df_backtest.reset_index(drop=True)
+    #df_hipp = df[df["source_label"] == "HF_hipp"].reset_index(drop=True)
+    list_ids = df["ID"].unique().tolist()
+    print(f"Total samples: {len(df)} | Unique IDs: {len(list_ids)}")
+    #train test split of IDs 10% of list_ids
+    list_ids_train, list_ids_backtest = train_test_split(list_ids, test_size=0.1, random_state=42)
+    df_backtest = df[(df["ID"].isin(list_ids_backtest))&(df["source_label"] == "HF_hipp")].reset_index(drop=True)
     # df_train: all df minus the selected backtest HF_hipp samples
     df_train = df[~df.filename_label.isin(df_backtest.filename_label)].reset_index(drop=True)
     print(f"Total samples: {len(df)} | Train samples: {len(df_train)} | Backtest samples: {len(df_backtest)}")
@@ -610,7 +613,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
         loss_function = DiceCELoss(to_onehot_y=True, softmax=True)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler   = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.95, patience=args.scheduler_patience
+            optimizer, mode='max', factor=0.95, patience= args.get('scheduler_patience',5)
         )
         scaler = GradScaler()
 
@@ -805,7 +808,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
     python training.py --model_name=segresnet --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/segresnet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=segresnet_mixup_lite --lr=1e-4 --weight_decay=1e-5
 
     UNET NO CONVERGE , DIFICIL DE ENTRENAR FROM SCRATCH, MEJOR CON PRETRAINED
-    python training.py --model_name=unet --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unet_mixup_lite --lr=1e-4 --weight_decay=1e-5    
+    python training.py --model_name=unet --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unet_mixup_lite --lr=1e-4 --weight_decay=1e-5 --early_stopping_patience=50 
 
     python training.py --model_name=unest --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard --lr=1e-4 --weight_decay=1e-5
 
