@@ -1,3 +1,4 @@
+wandb/
 codes/fold_models/
 
 results/preprocessed_data/

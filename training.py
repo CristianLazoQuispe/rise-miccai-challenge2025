@@ -31,6 +31,13 @@ import os
 #sys.path.append("../")
 from src.models import get_model
 
+from dotenv import load_dotenv
+
+os.environ["WANDB_DIR"] = "/data/cristian/paper_2025/wandb_dir"  # Aquí se guardarán los archivos temporales y logs
+os.environ["WANDB_CACHE_DIR"] = "/data/cristian/paper_2025/wandb_dir"
+os.environ["WANDB_ARTIFACT_DIR"] = "/data/cristian/paper_2025/wandb_dir"
+
+
 ################################################################################
 # UTILIDADES PARA MÉTRICAS (scipy disponible en este entorno)
 ################################################################################
@@ -521,9 +528,12 @@ def evaluate_model(model, val_loader, device,prefix="val",loss_function=None,fol
     return fold_metrics_means
 
 def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name="unet",early_stopping_patience=50,
-                       batch_size=1, lr=1e-4, weight_decay=1e-5, root_dir="./models",device = "cuda:5",aug_method="simple"):
+                       batch_size=1, lr=1e-4, weight_decay=1e-5, root_dir="./models",device = "cuda:5",aug_method="lite",use_mixup= False,args={}):
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     results = {"val_best": [], "test_best": []}
+
+    use_wandb = bool(os.getenv('WANDB_API_KEY')) and bool(os.getenv('PROJECT_WANDB'))
+
     # Remove 10% of HF_hipp samples from df for backtesting, keep the rest for training
     df_hipp = df[df["source_label"] == "HF_hipp"].reset_index(drop=True)
     df_hipp_train, df_backtest = train_test_split(df_hipp, test_size=0.1, random_state=42)
@@ -557,6 +567,20 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
     gkf = GroupKFold(n_splits=num_folds)
 
     for fold, (train_idx, val_idx) in enumerate(gkf.split(df, groups=df["ID"])):
+
+        if use_wandb:
+            import wandb
+            exp_name = args.get('experiment_name', 'rise_experiment')
+            run = wandb.init(
+                project=os.getenv('PROJECT_WANDB'),
+                entity=os.getenv('ENTITY'),
+                name=f"{exp_name}_fold{fold}",
+                group=exp_name,
+                config=args,
+                save_code=True,
+                reinit=True,
+            )
+
         df.loc[val_idx, "fold"] = fold
 
         df_train_fold = df[df["fold"] != fold].reset_index(drop=True)
@@ -574,7 +598,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
             print(f"IDs duplicados: {list(ids_comunes)}")
 
     
-        train_ds = MRIDataset3D(df_train_fold, transform=get_train_transforms_lite() if aug_method=="simple" else get_train_transforms_hard())
+        train_ds = MRIDataset3D(df_train_fold, transform=get_train_transforms_lite() if aug_method=="lite" else get_train_transforms_hard())
         val_ds   = MRIDataset3D(df_val_fold,   transform=get_val_transforms())
 
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=16, pin_memory=True)
@@ -602,12 +626,34 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
                 x = batch["image"].to(device)
                 y = batch["label"].to(device)
 
+                if y.ndim == 4:
+                    y = y.unsqueeze(1)  # Asegura shape [B, 1, D, H, W]
+
+                use_mixup_now = use_mixup and np.random.rand() < 0.5  # 50% de los batches
+
+                if use_mixup_now:
+                    # --- Aplicamos MixUp ---
+                    lam = np.random.beta(0.4, 0.4)
+                    index = torch.randperm(x.size(0)).to(x.device)
+
+                    x_mix = lam * x + (1 - lam) * x[index]
+                    y1 = y
+                    y2 = y[index]
+                else:
+                    # --- No MixUp ---
+                    x_mix = x
+                    y1 = y
+                    y2 = None  # no se usará
+
                 optimizer.zero_grad()
                 with torch.cuda.amp.autocast(enabled=True):
-                    #print("x,y:",x.shape, y.shape)  # Añadido para depuración
-                    logits = model(x)
-                    #print("logits:",logits.shape)  # Añadido para depuración
-                    loss   = loss_function(logits, y)
+                    logits = model(x_mix)
+
+                    if use_mixup_now:
+                        loss = lam * loss_function(logits, y1) + (1 - lam) * loss_function(logits, y2)
+                    else:
+                        loss = loss_function(logits, y1)
+
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
@@ -623,9 +669,23 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
             test_fold_metrics = evaluate_model(model, test_loader, device,prefix="test",loss_function=loss_function,fold=fold,epoch=epoch,full=False)
             test_loss = test_fold_metrics["test_loss"]
             test_dice_avg = test_fold_metrics["test_dice_Avg"]
-            print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_loss:.4f} Val Loss: {val_loss:.4f} Val Dice Avg: {dice_avg:.4f}"
-                  f" Test Loss: {test_loss:.4f} Test Dice Avg: {test_dice_avg:.4f}")
-            
+            print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_loss:.4f} Val Loss: {val_loss:.4f} Test Loss: {test_loss:.4f}"
+                  f" Val Dice Avg: {dice_avg:.4f}"
+                  f" Test Dice Avg: {test_dice_avg:.4f}")
+        
+            if use_wandb and run is not None:
+                step_epoch = epoch  # local step for this fold's run
+                log_data= {
+                    'epoch': epoch,
+                    'train/train_loss': epoch_loss,
+                    'val/val_loss': val_loss,
+                    'test/test_loss': test_loss,
+                }
+                for key, value in val_fold_metrics.items():
+                    log_data[f'val/{key}'] = value
+                for key, value in test_fold_metrics.items():
+                    log_data[f'test/{key}'] = value
+                run.log(log_data, step=step_epoch)
             # checkpoint: guarda si supera mejor dice promedio
             if dice_avg > best_dice:
                 early_stopping_counter = 0  # reset counter si hay mejora
@@ -648,8 +708,34 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
         test_fold_metrics = evaluate_model(model, test_loader, device, prefix="test_best", loss_function=loss_function,show=True)
         results["test_best"].append(test_fold_metrics)
 
+        
+        if use_wandb and run is not None:
+            step_epoch = epoch  # local step for this fold's run
+            log_data= {
+                'epoch': epoch,
+            }
+            for key, value in val_fold_metrics.items():
+                log_data[f'val_best/{key}'] = value
+            for key, value in test_fold_metrics.items():
+                log_data[f'test_best/{key}'] = value
+            run.log(log_data, step=step_epoch)
+        run.finish()
+
+
+
+    if use_wandb:
+        import wandb
+        exp_name = args.get('experiment_name', 'rise_experiment')
+        run = wandb.init(
+            project=os.getenv('PROJECT_WANDB'),
+            entity=os.getenv('ENTITY'),
+            name=f"{exp_name}_final",
+            group=exp_name,
+            config=args,
+            reinit=True,
+        )
     # promediamos sobre folds
-    final = {}
+    final = {"val_best":{},"test_best":{}}
     for prefix in ["val_best","test_best"]:
         for metric in ["dice","hd","hd95","assd","rve"]:
             for key in ["L","R","Avg"]:
@@ -660,7 +746,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
                     if llave in res:
                         print(f"Fold {idx+1} {llave}  : {res[llave]:.4f}")
                         vals.append(res[llave])
-                final[llave] = np.nanmean(vals)
+                final[prefix][llave] = np.nanmean(vals)
                 print(f"{llave}  : {final[llave]:.4f}")
 
         print("\n=== Resultado final promedio de 5 folds ===")
@@ -670,6 +756,17 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
                 if llave in final:
                     print(f"{llave}  : {final[llave]:.4f}")
     print("final:", final)
+    if use_wandb and run is not None:
+        step_epoch = epoch  # local step for this fold's run
+        log_data= {
+            'epoch': epoch,
+        }
+        for key, value in final["val_best"].items():
+            log_data[f'val_best/{key}'] = value
+        for key, value in final["test_best"].items():
+            log_data[f'test_best/{key}'] = value
+        run.log(log_data, step=step_epoch)
+    run.finish()
     return final
 
 ################################################################################
@@ -688,6 +785,8 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
 
     python training.py --model_name=unest --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_04_test_pruebis_hardaug/fold_models --num_epochs=50 --num_folds=5
 
+    python training.py --model_name=unest --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_04_test_pruebis_wandb/fold_models --num_epochs=5 --num_folds=3 --use_mixup=1 --aug_method=lite --experiment_name=unest_mixup_lite
+
     """
 
 
@@ -703,6 +802,9 @@ def parse_args():
                         help="Model architecture to use")
     parser.add_argument('--batch_size', type=int, default=4, help="Batch size for training")
     parser.add_argument('--early_stopping_patience', type=int, default=50, help="Batch size for training")
+    parser.add_argument('--experiment_name', type=str, default="base", help="Batch size for training")
+
+    parser.add_argument('--use_mixup', type=int, default=0, help="Batch size for training")
     
     parser.add_argument('--num_epochs', type=int, default=1000, help="Number of training epochs")
     parser.add_argument('--aug_method', type=str, default="lite", help="Number of training epochs")
@@ -718,6 +820,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
+    load_dotenv()
 
     
     # Carga tu CSV con rutas de imágenes y máscaras
@@ -736,7 +839,9 @@ if __name__ == "__main__":
         weight_decay=args.weight_decay,
         device=args.device,
         root_dir=args.root_dir,
-        aug_method=args.aug_method
+        aug_method=args.aug_method,
+        use_mixup = args.use_mixup,
+        args= vars(args).copy()
     )
 
     print("Métricas finales:", final_metrics)
