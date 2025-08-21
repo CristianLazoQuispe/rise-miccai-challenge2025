@@ -567,8 +567,10 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
     gkf = GroupKFold(n_splits=num_folds)
 
     for fold, (train_idx, val_idx) in enumerate(gkf.split(df, groups=df["ID"])):
-
-        if use_wandb:
+        
+        use_train = True
+        run = None
+        if use_wandb and use_train:
             import wandb
             exp_name = args.get('experiment_name', 'rise_experiment')
             run = wandb.init(
@@ -607,105 +609,111 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
         model = create_model(model_name,device).to(device)
         loss_function = DiceCELoss(to_onehot_y=True, softmax=True)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        scheduler   = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.95, patience=args.get('scheduler_patience', 5)
+        )
         scaler = GradScaler()
 
         # para guardar el mejor modelo del fold
         best_dice = 0.0
         fold_dir = os.path.join(root_dir, f"fold_{fold+1}")
         os.makedirs(fold_dir, exist_ok=True)
-        torch.save(model.state_dict(), os.path.join(fold_dir, "best_model.pth"))
 
-        early_stopping_counter = 0
-        #early_stopping_patience = 50  # detener si no hay mejora en 10
-        for epoch in range(num_epochs):
-            model.train()
-            epoch_loss = 0
-            pbar = tqdm.tqdm(train_loader, desc=f"Train Fold {fold} Epoch {epoch}", leave=False, dynamic_ncols=True)
-            #for batch in train_loader:
-            for batch in pbar:
-                x = batch["image"].to(device)
-                y = batch["label"].to(device)
+        if use_train:
+            torch.save(model.state_dict(), os.path.join(fold_dir, "best_model.pth"))
 
-                if y.ndim == 4:
-                    y = y.unsqueeze(1)  # Asegura shape [B, 1, D, H, W]
+            early_stopping_counter = 0
+            #early_stopping_patience = 50  # detener si no hay mejora en 10
+            for epoch in range(num_epochs):
+                model.train()
+                epoch_loss = 0
+                pbar = tqdm.tqdm(train_loader, desc=f"Train Fold {fold} Epoch {epoch}", leave=False, dynamic_ncols=True)
+                #for batch in train_loader:
+                for batch in pbar:
+                    x = batch["image"].to(device)
+                    y = batch["label"].to(device)
 
-                use_mixup_now = use_mixup and np.random.rand() < 0.5  # 50% de los batches
+                    if y.ndim == 4:
+                        y = y.unsqueeze(1)  # Asegura shape [B, 1, D, H, W]
 
-                if use_mixup_now:
-                    # --- Aplicamos MixUp ---
-                    lam = np.random.beta(0.4, 0.4)
-                    index = torch.randperm(x.size(0)).to(x.device)
-
-                    x_mix = lam * x + (1 - lam) * x[index]
-                    y1 = y
-                    y2 = y[index]
-                else:
-                    # --- No MixUp ---
-                    x_mix = x
-                    y1 = y
-                    y2 = None  # no se usará
-
-                optimizer.zero_grad()
-                with torch.cuda.amp.autocast(enabled=True):
-                    logits = model(x_mix)
+                    use_mixup_now = use_mixup and np.random.rand() < 0.5  # 50% de los batches
 
                     if use_mixup_now:
-                        loss = lam * loss_function(logits, y1) + (1 - lam) * loss_function(logits, y2)
+                        # --- Aplicamos MixUp ---
+                        lam = np.random.beta(0.4, 0.4)
+                        index = torch.randperm(x.size(0)).to(x.device)
+
+                        x_mix = lam * x + (1 - lam) * x[index]
+                        y1 = y
+                        y2 = y[index]
                     else:
-                        loss = loss_function(logits, y1)
+                        # --- No MixUp ---
+                        x_mix = x
+                        y1 = y
+                        y2 = None  # no se usará
 
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                    optimizer.zero_grad()
+                    with torch.cuda.amp.autocast(enabled=True):
+                        logits = model(x_mix)
 
-                epoch_loss += loss.item()
+                        if use_mixup_now:
+                            loss = lam * loss_function(logits, y1) + (1 - lam) * loss_function(logits, y2)
+                        else:
+                            loss = loss_function(logits, y1)
 
-            epoch_loss /= len(train_loader)
-            #print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f}")
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
 
-            val_fold_metrics = evaluate_model(model, val_loader, device,prefix="val",loss_function=loss_function,fold=fold,epoch=epoch,full=False)
-            dice_avg = val_fold_metrics["val_dice_Avg"]
-            val_loss = val_fold_metrics["val_loss"]
-            test_fold_metrics = evaluate_model(model, test_loader, device,prefix="test",loss_function=loss_function,fold=fold,epoch=epoch,full=False)
-            test_loss = test_fold_metrics["test_loss"]
-            test_dice_avg = test_fold_metrics["test_dice_Avg"]
-            print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_loss:.4f} Val Loss: {val_loss:.4f} Test Loss: {test_loss:.4f}"
-                  f" Val Dice Avg: {dice_avg:.4f}"
-                  f" Test Dice Avg: {test_dice_avg:.4f}")
-        
-            if use_wandb and run is not None:
-                step_epoch = epoch  # local step for this fold's run
-                log_data= {
-                    'epoch': epoch,
-                    'train/train_loss': epoch_loss,
-                    'val/val_loss': val_loss,
-                    'test/test_loss': test_loss,
-                }
-                for key, value in val_fold_metrics.items():
-                    log_data[f'val/{key}'] = value
-                for key, value in test_fold_metrics.items():
-                    log_data[f'test/{key}'] = value
-                run.log(log_data, step=step_epoch)
-            # checkpoint: guarda si supera mejor dice promedio
-            if dice_avg > best_dice:
-                early_stopping_counter = 0  # reset counter si hay mejora
-                best_dice = dice_avg
-                torch.save(model.state_dict(), os.path.join(fold_dir, "best_model.pth"))
-                print(f"Nuevo mejor modelo guardado - Avg Dice: {best_dice:.4f}",os.path.join(fold_dir, "best_model.pth"))
-            else:
-                early_stopping_counter += 1
-                if early_stopping_counter >= early_stopping_patience:
-                    print(f"No hay mejora en {early_stopping_patience} epochs. Deteniendo entrenamiento.")
-                    break
-            #else:
-            #    print("No se pudieron calcular métricas de validación (posiblemente máscaras vacías).")
+                    epoch_loss += loss.item()
+
+                epoch_loss /= len(train_loader)
+                #print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f}")
+
+                val_fold_metrics = evaluate_model(model, val_loader, device,prefix="val",loss_function=loss_function,fold=fold,epoch=epoch,full=False)
+                val_dice_avg = val_fold_metrics["val_dice_Avg"]
+                val_loss = val_fold_metrics["val_loss"]
+                test_fold_metrics = evaluate_model(model, test_loader, device,prefix="test",loss_function=loss_function,fold=fold,epoch=epoch,full=False)
+                test_loss = test_fold_metrics["test_loss"]
+                test_dice_avg = test_fold_metrics["test_dice_Avg"]
+                print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_loss:.4f} Val Loss: {val_loss:.4f} Test Loss: {test_loss:.4f}"
+                    f" Val Dice Avg: {val_dice_avg:.4f}"
+                    f" Test Dice Avg: {test_dice_avg:.4f}")
+            
+                if use_wandb and run is not None:
+                    step_epoch = epoch  # local step for this fold's run
+                    log_data= {
+                        'epoch': epoch,
+                        'train/train_loss': epoch_loss,
+                        'val/val_loss': val_loss,
+                        'test/test_loss': test_loss,
+                    }
+                    for key, value in val_fold_metrics.items():
+                        log_data[f'val/{key}'] = value
+                    for key, value in test_fold_metrics.items():
+                        log_data[f'test/{key}'] = value
+                    run.log(log_data, step=step_epoch)
+                # checkpoint: guarda si supera mejor dice promedio
+                scheduler.step(val_dice_avg)
+                if val_dice_avg > best_dice:
+                    early_stopping_counter = 0  # reset counter si hay mejora
+                    best_dice = val_dice_avg
+                    torch.save(model.state_dict(), os.path.join(fold_dir, "best_model.pth"))
+                    print(f"Nuevo mejor modelo guardado - Avg Dice: {best_dice:.4f}",os.path.join(fold_dir, "best_model.pth"))
+                else:
+                    early_stopping_counter += 1
+                    if early_stopping_counter >= early_stopping_patience:
+                        print(f"No hay mejora en {early_stopping_patience} epochs. Deteniendo entrenamiento.")
+                        break
+                #else:
+                #    print("No se pudieron calcular métricas de validación (posiblemente máscaras vacías).")
         # tras entrenamiento, evaluamos todo el fold (best checkpoint)
         # cargamos mejor modelo
         model.load_state_dict(torch.load(os.path.join(fold_dir, "best_model.pth")))
         model.eval()
-        val_fold_metrics = evaluate_model(model, val_loader, device, prefix="val_best", loss_function=loss_function,show=True)
+        val_fold_metrics = evaluate_model(model, val_loader, device, prefix="val_best", loss_function=loss_function,show=True,full=True)
         results["val_best"].append(val_fold_metrics)
-        test_fold_metrics = evaluate_model(model, test_loader, device, prefix="test_best", loss_function=loss_function,show=True)
+        test_fold_metrics = evaluate_model(model, test_loader, device, prefix="test_best", loss_function=loss_function,show=True,full=True)
         results["test_best"].append(test_fold_metrics)
 
         
@@ -719,7 +727,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
             for key, value in test_fold_metrics.items():
                 log_data[f'test_best/{key}'] = value
             run.log(log_data, step=step_epoch)
-        run.finish()
+            run.finish()
 
 
 
@@ -737,17 +745,31 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
     # promediamos sobre folds
     final = {"val_best":{},"test_best":{}}
     for prefix in ["val_best","test_best"]:
-        for metric in ["dice","hd","hd95","assd","rve"]:
-            for key in ["L","R","Avg"]:
-                vals = []
-                llave = f"{prefix}_{metric}_{key}"
-
-                for idx,res in enumerate(results[prefix]):
-                    if llave in res:
-                        print(f"Fold {idx+1} {llave}  : {res[llave]:.4f}")
-                        vals.append(res[llave])
-                final[prefix][llave] = np.nanmean(vals)
-                print(f"{llave}  : {final[llave]:.4f}")
+        llaves = results[prefix][0].keys()  # keys from first fold
+        vals = []
+        for results_fold in results[prefix]:
+            for llave in llaves:
+                if llave not in final[prefix]:
+                    final[prefix][llave] = []
+                if llave in results_fold:
+                    val = results_fold[llave]
+                    if isinstance(val, (int, float)):
+                        final[prefix][llave].append(val)
+                    elif isinstance(val, list):
+                        final[prefix][llave].extend(val)
+                    else:
+                        print(f"Tipo de dato no soportado para {llave}: {type(val)}")
+        # ahora promediamos los valores
+        for llave, vals in final[prefix].items():
+            if len(vals) > 0:
+                if isinstance(vals[0], (int, float)):
+                    final[prefix][llave] = np.mean(vals)
+                elif isinstance(vals[0], list):
+                    final[prefix][llave] = [np.mean([v[i] for v in vals]) for i in range(len(vals[0]))]
+                else:
+                    print(f"Tipo de dato no soportado para promediar {llave}: {type(vals[0])}")
+            else:
+                final[prefix][llave] = np.nan
 
         print("\n=== Resultado final promedio de 5 folds ===")
         for metric in ["dice","hd","hd95","assd","rve"]:
@@ -757,15 +779,15 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
                     print(f"{llave}  : {final[llave]:.4f}")
     print("final:", final)
     if use_wandb and run is not None:
-        step_epoch = epoch  # local step for this fold's run
+        step_epoch = 0  # local step for this fold's run
         log_data= {
-            'epoch': epoch,
+            'epoch': 0,
         }
         for key, value in final["val_best"].items():
             log_data[f'val_best/{key}'] = value
         for key, value in final["test_best"].items():
             log_data[f'test_best/{key}'] = value
-        run.log(log_data, step=step_epoch)
+        run.log(log_data, step=0)
     run.finish()
     return final
 
@@ -773,21 +795,19 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
 # EJECUCIÓN PRINCIPAL
 ################################################################################
 
-
-
-
-
-
-
 # Entrenamiento y evaluación con UNet
 """
-    python training.py --model_name=unest --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_04_test_pruebis/fold_models --num_epochs=50 --num_folds=5
 
-    python training.py --model_name=unest --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_04_test_pruebis_hardaug/fold_models --num_epochs=50 --num_folds=5
+    python training.py --model_name=unest --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unest_mixup_lite --lr=1e-4 --weight_decay=1e-5
+    
+    python training.py --model_name=swinunetr --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/swinunetr_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=swinunetr_mixup_lite --lr=1e-4 --weight_decay=1e-5
 
-    python training.py --model_name=unest --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_04_test_pruebis_wandb/fold_models --num_epochs=5 --num_folds=3 --use_mixup=1 --aug_method=lite --experiment_name=unest_mixup_lite
+    python training.py --model_name=segresnet --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/segresnet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=segresnet_mixup_lite --lr=1e-4 --weight_decay=1e-5
 
-    """
+    python training.py --model_name=unet --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unet_mixup_lite --lr=1e-4 --weight_decay=1e-5    
+
+
+"""
 
 
 
@@ -798,7 +818,7 @@ from sklearn.model_selection import StratifiedKFold
 def parse_args():
     parser = argparse.ArgumentParser(description="Train 3D segmentation model for LISA Challenge")
 
-    parser.add_argument('--model_name', type=str, default="swinunetr", choices=["swinunetr", "unetr","segresnet", "unest"],
+    parser.add_argument('--model_name', type=str, default="swinunetr", choices=["swinunetr", "unet","segresnet", "unest"],
                         help="Model architecture to use")
     parser.add_argument('--batch_size', type=int, default=4, help="Batch size for training")
     parser.add_argument('--early_stopping_patience', type=int, default=50, help="Batch size for training")
@@ -806,7 +826,7 @@ def parse_args():
 
     parser.add_argument('--use_mixup', type=int, default=0, help="Batch size for training")
     
-    parser.add_argument('--num_epochs', type=int, default=1000, help="Number of training epochs")
+    parser.add_argument('--num_epochs', type=int, default=5000, help="Number of training epochs")
     parser.add_argument('--aug_method', type=str, default="lite", help="Number of training epochs")
 
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate")
