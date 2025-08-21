@@ -610,7 +610,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
         loss_function = DiceCELoss(to_onehot_y=True, softmax=True)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler   = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.95, patience=args.get('scheduler_patience', 5)
+            optimizer, mode='max', factor=0.95, patience=args.get('scheduler_patience', args.scheduler_patience)
         )
         scaler = GradScaler()
 
@@ -823,6 +823,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=4, help="Batch size for training")
     parser.add_argument('--early_stopping_patience', type=int, default=50, help="Batch size for training")
     parser.add_argument('--experiment_name', type=str, default="base", help="Batch size for training")
+    parser.add_argument('--scheduler_patience', type=int, default=5, help="scheduler_patience")
 
     parser.add_argument('--use_mixup', type=int, default=0, help="Batch size for training")
     
