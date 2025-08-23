@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from monai.losses import DiceCELoss, HausdorffDTLoss
 import torch.nn.functional as F
 from monai.losses import DiceFocalLoss
+import torch
+import torch.nn.functional as F
 
 
 def create_loss_function(loss_name="dice_ce"):
@@ -97,8 +99,6 @@ def create_loss_function(loss_name="dice_ce"):
         return loss_dicece_sym
 
     elif loss_name == "lovasz_softmax":
-        import torch
-        import torch.nn.functional as F
 
         def lovasz_grad(gt_sorted):
             # gradiente de Lovasz extension para IoU
