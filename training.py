@@ -12,16 +12,7 @@ import torch.nn as nn
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 
-from monai.data import Dataset, decollate_batch
-from monai.transforms import (
-    Compose, LoadImaged, EnsureChannelFirstd, Orientationd,
-    CropForegroundd, Spacingd, ScaleIntensityRanged, Resized,
-    RandFlipd, RandRotate90d, RandAffineD, RandBiasFieldd, RandGaussianNoised,
-    RandAdjustContrastd, EnsureTyped, OneOf, AsDiscreted, ResampleToMatchd,RandRotated,RandAffined
-)
 from monai.inferers import sliding_window_inference
-from monai.networks.nets import UNet
-from monai.losses import DiceCELoss
 
 import tqdm
 
@@ -29,7 +20,10 @@ import sys
 import os
 
 #sys.path.append("../")
-from src.models import get_model
+from src.models import create_model
+from src import metrics
+from src import dataset
+from src import losses
 
 from dotenv import load_dotenv
 
@@ -38,68 +32,6 @@ os.environ["WANDB_CACHE_DIR"] = "/data/cristian/paper_2025/wandb_dir"
 os.environ["WANDB_ARTIFACT_DIR"] = "/data/cristian/paper_2025/wandb_dir"
 
 
-################################################################################
-# UTILIDADES PARA MÉTRICAS (scipy disponible en este entorno)
-################################################################################
-from scipy.spatial.distance import cdist
-def dice_score(pred, gt, cls):
-    """
-    Dice para una clase específica.
-    pred, gt: arrays 3D de ints (0,1,2); cls: entero de clase.
-    Devuelve NaN si en GT no hay voxels de esa clase.
-    """
-    pred_bin = (pred == cls)
-    gt_bin   = (gt == cls)
-    inter = np.logical_and(pred_bin, gt_bin).sum()
-    denom = pred_bin.sum() + gt_bin.sum()
-    if denom == 0:
-        return np.nan  # No voxels en ninguna => ignorar
-    return 2.0 * inter / denom
-
-def hausdorff_distance(pred, gt, cls, percentile=100):
-    """
-    HD o HD95 (si percentile=95). pred y gt de shape (Z,H,W).
-    Si alguna máscara está vacía devuelve NaN.
-    """
-    p = (pred == cls)
-    g = (gt   == cls)
-    if p.sum() == 0 or g.sum() == 0:
-        return np.nan
-    coords_p = np.argwhere(p)
-    coords_g = np.argwhere(g)
-    dists = cdist(coords_p, coords_g)
-    d_p_to_g = dists.min(axis=1)
-    d_g_to_p = dists.min(axis=0)
-    all_d = np.concatenate([d_p_to_g, d_g_to_p])
-    return np.percentile(all_d, percentile)
-
-def assd(pred, gt, cls):
-    """
-    Average Symmetric Surface Distance (ASSD). 
-    Calcula distancias entre voxels de superficie.
-    Devuelve NaN si alguna máscara vacía.
-    """
-    p = (pred == cls)
-    g = (gt   == cls)
-    if p.sum() == 0 or g.sum() == 0:
-        return np.nan
-    coords_p = np.argwhere(p)
-    coords_g = np.argwhere(g)
-    dists = cdist(coords_p, coords_g)
-    d_p_to_g = dists.min(axis=1)
-    d_g_to_p = dists.min(axis=0)
-    return (d_p_to_g.mean() + d_g_to_p.mean()) / 2.0
-
-def rve(pred, gt, cls):
-    """
-    Relative Volume Error: (Vol_pred - Vol_gt) / Vol_gt.
-    Devuelve NaN si Vol_gt=0.
-    """
-    v_pred = (pred == cls).sum()
-    v_gt   = (gt   == cls).sum()
-    if v_gt == 0:
-        return np.nan
-    return (v_pred - v_gt) / v_gt
 
 ################################################################################
 # TRANSFORMS
@@ -107,350 +39,6 @@ def rve(pred, gt, cls):
 SPACING      = (1.0, 1.0, 1.0)
 SPATIAL_SIZE = (120, 120, 120)
 SPATIAL_SIZE = (96,96,96)
-
-def get_train_transforms_lite():
-    return Compose([
-        LoadImaged(keys=["image","label"]),
-        EnsureChannelFirstd(keys=["image","label"]),
-        Orientationd(keys=["image","label"], axcodes="RAS"),
-        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
-        Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
-        ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
-        #
-        # ---- Reescalado correcto ----
-        Resized(keys=["image"], spatial_size=SPATIAL_SIZE,
-                mode="trilinear", align_corners=False, anti_aliasing=True),
-        Resized(keys=["label"], spatial_size=SPATIAL_SIZE,
-                mode="nearest", anti_aliasing=False),         
-        # Ejemplo de augmentación: flips y rotaciones aleatorias
-        OneOf([
-            RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=1),  #  si usar
-            RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=2),  # si usar
-            RandRotate90d(keys=["image","label"], prob=0.5, max_k=3), # si usar
-        ]),
-
-
-        OneOf([
-            RandRotated( # si usar RandRotated,RandAffined
-                keys=["image","label"], prob=0.5,
-                range_z=(-0.8, 0.8),
-                mode=("bilinear","nearest")),
-            
-            RandAffined( # si usar
-                keys=["image","label"], prob=0.5,
-                rotate_range=(0.4,0,0),
-                translate_range=(0, 20 , 20),
-                scale_range=(0.10,0.10,0.10),
-                padding_mode="zeros",
-                mode=("bilinear","nearest"),
-            ),
-        ]),
-
-        OneOf([
-            RandBiasFieldd(keys=["image"], prob=0.5, coeff_range=(0.0,0.05)),
-            RandGaussianNoised(keys=["image"], prob=0.5, std=0.01),
-            RandAdjustContrastd(keys=["image"], prob=0.5, gamma=(0.7,1.5)),
-        ]),
-
-
-        EnsureTyped(keys=["image","label"], track_meta=True),
-    ])
-
-
-def get_train_transforms_hard():
-    return Compose([
-        LoadImaged(keys=["image","label"]),
-        EnsureChannelFirstd(keys=["image","label"]),
-        Orientationd(keys=["image","label"], axcodes="RAS"),
-        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
-        Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
-        ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
-        #
-        # ---- Reescalado correcto ----
-        Resized(keys=["image"], spatial_size=SPATIAL_SIZE,
-                mode="trilinear", align_corners=False, anti_aliasing=True),
-        Resized(keys=["label"], spatial_size=SPATIAL_SIZE,
-                mode="nearest", anti_aliasing=False),   
-                
-        # Ejemplo de augmentación: flips y rotaciones aleatorias
-        OneOf([
-            RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=0),  #  si usar
-            RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=1),  #  si usar
-            RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=2),  # si usar
-            RandRotate90d(keys=["image","label"], prob=0.5, max_k=3), # si usar
-        ]),
-        OneOf([
-
-            RandRotated( # si usar RandRotated,RandAffined
-                keys=["image","label"], prob=0.5,
-                range_z=(-0.8, 0.8),
-                mode=("bilinear","nearest")),
-            
-            RandAffined( # si usar
-                keys=["image","label"], prob=0.5,
-                rotate_range=(0.4,0.4,0.4),
-                translate_range=(20, 20 , 20),
-                scale_range=(0.10,0.10,0.10),
-                padding_mode="zeros",
-                mode=("bilinear","nearest"),
-            ),
-        ]),
-
-        OneOf([
-            RandBiasFieldd(keys=["image"], prob=0.5, coeff_range=(0.0,0.05)),
-            RandGaussianNoised(keys=["image"], prob=0.5, std=0.01),
-            RandAdjustContrastd(keys=["image"], prob=0.5, gamma=(0.7,1.5)),
-        ]),
-
-
-        EnsureTyped(keys=["image","label"], track_meta=True),
-    ])
-
-
-def get_val_transforms():
-    return Compose([
-        LoadImaged(keys=["image","label"]),
-        EnsureChannelFirstd(keys=["image","label"]),
-        Orientationd(keys=["image","label"], axcodes="RAS"),
-        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
-        Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
-        ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
-        #
-        # ---- Reescalado correcto ----
-        Resized(keys=["image"], spatial_size=SPATIAL_SIZE,
-                mode="trilinear", align_corners=False, anti_aliasing=True),
-        Resized(keys=["label"], spatial_size=SPATIAL_SIZE,
-                mode="nearest", anti_aliasing=False),        
-        EnsureTyped(keys=["image","label"], track_meta=True),
-    ])
-
-################################################################################
-# DATASET y DATALOADER
-################################################################################
-class MRIDataset3D(Dataset):
-    def __init__(self, df: pd.DataFrame, transform=None):
-        data = []
-        for _, r in df.iterrows():
-            item = {"image": r["filepath"]}
-            if "filepath_label" in r and pd.notna(r["filepath_label"]):
-                item["label"] = r["filepath_label"]
-            data.append(item)
-        super().__init__(data, transform=transform)
-
-################################################################################
-# MODELOS
-################################################################################
-def create_model(model_name="unet",device="cuda:5"):
-    """
-    Devuelve un modelo MONAI:
-      - 'unet'   → UNet 3D simple.
-      - 'unetr'  → Ejemplo transformer (necesita monai >= 1.0).
-    Añade aquí otras arquitecturas.
-    """
-    if model_name.lower() == "unet":
-        return  UNet(
-            spatial_dims=3,
-            in_channels=1,
-            out_channels=3,       # binario
-            channels=(16, 32, 64, 128),
-            strides=(2, 2, 2),
-        )
-    elif model_name.lower() == "unest":
-        return get_model(name=model_name, num_classes=3, device=device)
-
-    elif model_name.lower() == "swinunetr":
-        from monai.networks.nets import SwinUNETR
-        from huggingface_hub import hf_hub_download
-        """
-        model = SwinUNETR(in_channels=1, out_channels=14, feature_size=48, use_checkpoint=True)
-        # 📦 Descargar pesos preentrenados
-        model_path = hf_hub_download(
-            repo_id="MONAI/swin_unetr_btcv_segmentation",
-            filename="models/model.pt",
-            local_dir="/data/cristian/projects/med_data/rise-miccai/pretrained_models/swin_unetr_btcv_segmentation/",
-            local_dir_use_symlinks=False
-        )
-
-        # ✅ Cargar directamente el state_dict (no usar load_from aquí)
-        state_dict = torch.load(model_path, map_location="cpu")
-        model.load_state_dict(state_dict)
-        """
-        import torch
-        import torch.nn as nn
-        from monai.networks.nets import SwinUNETR
-        from huggingface_hub import hf_hub_download
-
-
-        class AdaptedSwinUNETR(nn.Module):
-            def __init__(
-                self,
-                img_size=(96, 96, 96),
-                in_channels=1,
-                num_classes=3,
-                pretrained=True,
-                freeze_stage=0,  # 0: none, 1: freeze all, 2: freeze encoder only
-                bottleneck=32,
-                use_checkpoint=True,
-                repo_id="MONAI/swin_unetr_btcv_segmentation",
-                filename="models/model.pt",
-                cache_dir="/data/cristian/projects/med_data/rise-miccai/pretrained_models/swin_unetr_btcv_segmentation/",
-                device="cuda:0",
-            ):
-                super().__init__()
-
-                # Backbone con salida original (14 clases BTCV)
-                self.backbone = SwinUNETR(
-                    #img_size=img_size,
-                    in_channels=in_channels,
-                    out_channels=14,  # Pretrained
-                    feature_size=48,
-                    use_checkpoint=use_checkpoint,
-                )
-
-                if pretrained:
-                    ckpt_path = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=filename,
-                        local_dir=cache_dir,
-                        local_dir_use_symlinks=False,
-                    )
-                    state_dict = torch.load(ckpt_path, map_location="cpu")
-                    self.backbone.load_state_dict(state_dict)
-                    print("Cargados pesos preentrenados desde:", ckpt_path)
-
-                # ❄️ Freeze encoder si se requiere (solo backbone, no head)
-                # 🔁 Fijar pesos si se requiere
-                if freeze_stage == 1:
-                    for param in self.backbone.parameters():
-                        param.requires_grad = False
-                elif freeze_stage == 2:
-                    for name, param in self.backbone.named_parameters():
-                        if "decoder" not in name and "up" not in name and "out" not in name:
-                            print("freeze param:", name)
-                            param.requires_grad = False
-
-                # 🎯 Adapter elegante con bottleneck
-                self.adapter = nn.Sequential(
-                    nn.Conv3d(14, bottleneck, kernel_size=1, bias=False),
-                    nn.GroupNorm(num_groups=8, num_channels=bottleneck),
-                    nn.ReLU(inplace=True),
-                    nn.Dropout3d(p=0.1),
-                    nn.Conv3d(bottleneck, num_classes, kernel_size=1, bias=True)
-                )
-
-                self.to(device)
-
-            def forward(self, x):
-                x = self.backbone(x)  # [B, 14, D, H, W]
-                x = self.adapter(x)   # [B, 3, D, H, W]
-                return x
-
-
-        model = AdaptedSwinUNETR(
-                img_size=(96, 96, 96),
-                in_channels=1,
-                num_classes=3,
-                freeze_stage=0,  # Puedes controlar qué congelar (0: nada, 1: todo, 2: encoder NO FUNCIONO)
-                pretrained=True,
-                device=device,
-            )
-
-        return model
-
-    elif model_name.lower() == "segresnet":
-        from monai.networks.nets import SegResNet
-        from huggingface_hub import hf_hub_download
-        """
-        model = SegResNet(spatial_dims=3, in_channels=1, out_channels=105, init_filters=32, blocks_down=[1,2,2,4])
-        # 📦 Descargar pesos preentrenados
-        model_path = hf_hub_download(
-            repo_id="MONAI/wholeBody_ct_segmentation",
-            filename="models/model.pt",
-            local_dir="/data/cristian/projects/med_data/rise-miccai/pretrained_models/wholeBody_ct_segmentation/",
-            local_dir_use_symlinks=False
-        )
-        # ✅ Cargar directamente el state_dict (no usar load_from aquí)
-        state_dict = torch.load(model_path, map_location="cpu")
-        model.load_state_dict(state_dict)
-        """
-        import torch
-        import torch.nn as nn
-        from monai.networks.nets import SegResNet
-        from huggingface_hub import hf_hub_download
-
-
-        class AdaptedSegResNetV2(nn.Module):
-            def __init__(
-                self,
-                pretrained=True,
-                repo_id="MONAI/wholeBody_ct_segmentation",
-                filename="models/model.pt",
-                cache_dir="/data/cristian/projects/med_data/rise-miccai/pretrained_models/wholeBody_ct_segmentation/",
-                freeze_stage=0,  # 0: none, 1: freeze all, 2: freeze encoder only
-                bottleneck=32,
-                num_classes=3,
-                device="cuda:0",
-            ):
-                super().__init__()
-
-                # Backbone con salida original (105 clases del modelo preentrenado)
-                self.backbone = SegResNet(
-                    spatial_dims=3,
-                    in_channels=1,
-                    out_channels=105,
-                    init_filters=32,
-                    blocks_down=[1, 2, 2, 4],
-                )
-
-                if pretrained:
-                    ckpt_path = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=filename,
-                        local_dir=cache_dir,
-                        local_dir_use_symlinks=False,
-                    )
-                    state_dict = torch.load(ckpt_path, map_location="cpu")
-                    self.backbone.load_state_dict(state_dict)
-                    print("Cargados pesos preentrenados desde:", ckpt_path)
-
-                # 🔁 Fijar pesos si se requiere
-                if freeze_stage == 1:
-                    for param in self.backbone.parameters():
-                        param.requires_grad = False
-                elif freeze_stage == 2:
-                    for name, param in self.backbone.named_parameters():
-                        if "decoder" not in name and "upsample" not in name:
-                            print("freeze param:", name)
-                            param.requires_grad = False
-
-                # 🔄 Adapter más sofisticado que simple conv
-                self.adapter = nn.Sequential(
-                    nn.Conv3d(105, bottleneck, kernel_size=1, bias=False),
-                    nn.GroupNorm(num_groups=8, num_channels=bottleneck),
-                    nn.ReLU(inplace=True),
-                    nn.Dropout3d(p=0.1),
-                    nn.Conv3d(bottleneck, num_classes, kernel_size=1, bias=True)
-                )
-
-                self.to(device)
-
-            def forward(self, x):
-                x = self.backbone(x)
-                x = self.adapter(x)
-                return x
-
-
-        model = AdaptedSegResNetV2(
-                pretrained=True,
-                freeze_stage=0,  # Puedes controlar qué congelar (0: nada, 1: todo, 2: encoder NO FUNCIONO)
-                bottleneck=32,
-                num_classes=3,
-                device=device
-            )
-    
-        return model
-    else:
-        raise ValueError(f"Modelo no soportado: {model_name}")
 
 ################################################################################
 # ENTRENAMIENTO CON 5 FOLDS
@@ -489,12 +77,12 @@ def evaluate_model(model, val_loader, device,prefix="val",loss_function=None,fol
             for p, g in zip(preds_np, gts_np):
                 # clases: 1 = L, 2 = R
                 for cls, key in [(1, "L"), (2, "R")]:
-                    dsc  = dice_score(p, g, cls)
+                    dsc  = metrics.dice_score(p, g, cls)
                     if full:
-                        hd   = hausdorff_distance(p, g, cls, percentile=100)
-                        hd95 = hausdorff_distance(p, g, cls, percentile=95)
-                        dist = assd(p, g, cls)
-                        vol  = rve(p, g, cls)
+                        hd   = metrics.hausdorff_distance(p, g, cls, percentile=100)
+                        hd95 = metrics.hausdorff_distance(p, g, cls, percentile=95)
+                        dist = metrics.assd(p, g, cls)
+                        vol  = metrics.rve(p, g, cls)
 
                     if not np.isnan(dsc):  fold_metrics[f"dice_{key}"].append(dsc)
                     if full:
@@ -584,17 +172,8 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
 
 
     df = df_train
-    test_ds   = MRIDataset3D(df_backtest,   transform=get_val_transforms())
-    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
-    """
-    # Stratify by 'ID' column (or another column, e.g. 'filename_label')
-    stratify_col = df["ID"] if "ID" in df.columns else df["filename_label"]
-    skf = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=42)
-    for fold, (train_idx, val_idx) in enumerate(skf.split(df, stratify_col)):
-        print(f"\n===== Fold {fold+1}/{num_folds} =====")
-        df_train_fold = df.iloc[train_idx].reset_index(drop=True)
-        df_val_fold   = df.iloc[val_idx].reset_index(drop=True)
-    """
+    test_ds      = dataset.MRIDataset3D(df_backtest,   transform=dataset.get_val_transforms(SPACING=SPACING,SPATIAL_SIZE=SPATIAL_SIZE))
+    test_loader  = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
     
     # Verifica que 'ID' existe
     assert "ID" in df.columns, "Falta la columna 'ID'"
@@ -644,14 +223,16 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
         #raise
 
     
-        train_ds = MRIDataset3D(df_train_fold, transform=get_train_transforms_lite() if aug_method=="lite" else get_train_transforms_hard())
-        val_ds   = MRIDataset3D(df_val_fold,   transform=get_val_transforms())
+        train_ds = dataset.MRIDataset3D(df_train_fold,
+                                         transform=dataset.get_train_transforms_lite(SPACING=SPACING,SPATIAL_SIZE=SPATIAL_SIZE) if aug_method=="lite" else dataset.get_train_transforms_hard(SPACING=SPACING,SPATIAL_SIZE=SPATIAL_SIZE))
+        val_ds   = dataset.MRIDataset3D(df_val_fold,   transform=dataset.get_val_transforms(SPACING=SPACING,SPATIAL_SIZE=SPATIAL_SIZE))
 
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=16, pin_memory=True)
         val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
 
         model = create_model(model_name,device).to(device)
-        loss_function = DiceCELoss(to_onehot_y=True, softmax=True)
+        #loss_function = DiceCELoss(to_onehot_y=True, softmax=True)
+        loss_function = losses.create_loss_function(args.get('loss_function','dice_ce'))
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler   = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=0.95, patience= args.get('scheduler_patience',5)
@@ -853,6 +434,23 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
 
     python training.py --model_name=unest --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard --lr=1e-4 --weight_decay=1e-5
 
+
+    
+
+    python training.py --model_name=unest --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_dice_lovasz_softmax/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_lovasz_softmax --lr=1e-4 --weight_decay=1e-5 --loss_function=lovasz_softmax
+
+    
+    python training.py --model_name=unest --device=cuda:1 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_dice_ce_hd95/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_dice_ce_hd95 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_hd95
+
+    python training.py --model_name=unest --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_gdl_focal/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_gdl_focal --lr=1e-4 --weight_decay=1e-5 --loss_function=gdl_focal
+
+    python training.py --model_name=unest --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_focal_tversky/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_focal_tversky --lr=1e-4 --weight_decay=1e-5 --loss_function=focal_tversky
+
+    python training.py --model_name=unest --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_dice_ce_symmetry/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_dice_ce_symmetry --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry
+
+    python training.py --model_name=unest --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_dice_ce/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_dice_ce --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce
+
+            
 """
 
 
@@ -867,14 +465,16 @@ def parse_args():
     parser.add_argument('--model_name', type=str, default="swinunetr", choices=["swinunetr", "unet","segresnet", "unest"],
                         help="Model architecture to use")
     parser.add_argument('--batch_size', type=int, default=4, help="Batch size for training")
-    parser.add_argument('--early_stopping_patience', type=int, default=60, help="Batch size for training")
+    parser.add_argument('--early_stopping_patience', type=int, default=80, help="Batch size for training")
     parser.add_argument('--experiment_name', type=str, default="base", help="Batch size for training")
-    parser.add_argument('--scheduler_patience', type=int, default=5, help="scheduler_patience")
+    parser.add_argument('--scheduler_patience', type=int, default=25, help="scheduler_patience")
 
     parser.add_argument('--use_mixup', type=int, default=0, help="Batch size for training")
     
     parser.add_argument('--num_epochs', type=int, default=5000, help="Number of training epochs")
     parser.add_argument('--aug_method', type=str, default="lite", help="Number of training epochs")
+
+    parser.add_argument('--loss_function', type=str, default="dice_ce", help="Number of training epochs")
 
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate")
     parser.add_argument('--weight_decay', type=float, default=1e-5, help="Weight decay (L2 regularization)")
@@ -908,6 +508,7 @@ if __name__ == "__main__":
         root_dir=args.root_dir,
         aug_method=args.aug_method,
         use_mixup = args.use_mixup,
+        early_stopping_patience=args.early_stopping_patience,
         args= vars(args).copy()
     )
 
