@@ -427,6 +427,8 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
 
     ###
 
+    python training.py --model_name=efficientnet-b7 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_hard_dice_ce_symmetry/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=efficientnet-b7_mixup_hard_dice_ce_symmetry --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry
+
     python training.py --model_name=efficientnet-b7 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_ce_edge/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_ce_edge --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_edge
         
     python training.py --model_name=efficientnet-b7 --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_gdl_volbal/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_gdl_volbal --lr=1e-4 --weight_decay=1e-5 --loss_function=gdl_volbal
