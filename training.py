@@ -425,34 +425,25 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
     UNET NO CONVERGE , DIFICIL DE ENTRENAR FROM SCRATCH, MEJOR CON PRETRAINED
     python training.py --model_name=unet --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unet_mixup_lite --lr=1e-4 --weight_decay=1e-5 --early_stopping_patience=60 
 
+    ###
+
+    python training.py --model_name=efficientnet-b7 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_ce_edge/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_ce_edge --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_edge
+        
+    python training.py --model_name=efficientnet-b7 --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_gdl_volbal/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_gdl_volbal --lr=1e-4 --weight_decay=1e-5 --loss_function=gdl_volbal
+
+    python training.py --model_name=efficientnet-b7 --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_bootce/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_bootce --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_bootce
+
+    python training.py --model_name=efficientnet-b7 --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_focal_foreground_lovasz/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_focal_foreground_lovasz --lr=1e-4 --weight_decay=1e-5 --loss_function=focal_foreground_lovasz
+
+    python training.py --model_name=efficientnet-b7 --device=cuda:1 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_surface/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_surface --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_surface
+        
+    python training.py --model_name=efficientnet-b7 --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_ce_symmetry/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_ce_symmetry --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry
+
+
+
+
     
-    python training.py --model_name=unest --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unest_mixup_lite --lr=1e-4 --weight_decay=1e-5
     
-    python training.py --model_name=swinunetr --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/swinunetr_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=swinunetr_mixup_lite --lr=1e-4 --weight_decay=1e-5
-
-    python training.py --model_name=segresnet --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/segresnet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=segresnet_mixup_lite --lr=1e-4 --weight_decay=1e-5
-
-    python training.py --model_name=unest --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard --lr=1e-4 --weight_decay=1e-5
-
-
-    
-
-    python training.py --model_name=unest --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_dice_lovasz_softmax/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_lovasz_softmax --lr=1e-4 --weight_decay=1e-5 --loss_function=lovasz_softmax
-
-    
-    python training.py --model_name=unest --device=cuda:1 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_dice_ce_hd95/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_dice_ce_hd95 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_hd95
-
-    python training.py --model_name=unest --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_gdl_focal/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_gdl_focal --lr=1e-4 --weight_decay=1e-5 --loss_function=gdl_focal
-
-    python training.py --model_name=unest --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_focal_tversky/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_focal_tversky --lr=1e-4 --weight_decay=1e-5 --loss_function=focal_tversky
-
-    python training.py --model_name=unest --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_dice_ce_symmetry/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_dice_ce_symmetry --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry
-
-    python training.py --model_name=unest --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unest_mixup_hard_dice_ce/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_dice_ce --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce
-
-    python training.py --model_name=unestpn --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unestpn_mixup_hard_dice_ce/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=unest_mixup_hard_dice_ce --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce
-
-
 """
 
 
@@ -464,7 +455,7 @@ from sklearn.model_selection import StratifiedKFold
 def parse_args():
     parser = argparse.ArgumentParser(description="Train 3D segmentation model for LISA Challenge")
 
-    parser.add_argument('--model_name', type=str, default="swinunetr", choices=["swinunetr", "unet","segresnet", "unest","unestpn"],
+    parser.add_argument('--model_name', type=str, default="swinunetr", #, choices=["swinunetr", "unet","segresnet", "unest","unestpn"],
                         help="Model architecture to use")
     parser.add_argument('--batch_size', type=int, default=4, help="Batch size for training")
     parser.add_argument('--early_stopping_patience', type=int, default=80, help="Batch size for training")
