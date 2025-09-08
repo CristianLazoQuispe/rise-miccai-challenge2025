@@ -9,12 +9,18 @@ from monai.transforms import (
 import pandas as pd
 
 
+def is_positive_background(img):
+    """
+    Returns a boolean version of `img` where the positive values are converted into True, the other values are False.
+    """
+    return img > 0.5
+
 def get_train_transforms_lite(SPACING,SPATIAL_SIZE):
     return Compose([
         LoadImaged(keys=["image","label"]),
         EnsureChannelFirstd(keys=["image","label"]),
         Orientationd(keys=["image","label"], axcodes="RAS"),
-        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
+        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=False,select_fn=is_positive_background),
         Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
         ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
         #
@@ -63,7 +69,7 @@ def get_train_transforms_hard(SPACING,SPATIAL_SIZE):
         LoadImaged(keys=["image","label"]),
         EnsureChannelFirstd(keys=["image","label"]),
         Orientationd(keys=["image","label"], axcodes="RAS"),
-        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
+        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=False,select_fn=is_positive_background),
         Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
         ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
         #
@@ -113,7 +119,7 @@ def get_val_transforms(SPACING,SPATIAL_SIZE):
         LoadImaged(keys=["image","label"]),
         EnsureChannelFirstd(keys=["image","label"]),
         Orientationd(keys=["image","label"], axcodes="RAS"),
-        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=True),
+        CropForegroundd(keys=["image","label"], source_key="image", allow_smaller=False,select_fn=is_positive_background),
         Spacingd(keys=["image","label"], pixdim=SPACING, mode=("bilinear","nearest")),
         ScaleIntensityRanged(keys=["image"], a_min=0.0, a_max=15.0, b_min=0.0, b_max=1.0, clip=True),
         #

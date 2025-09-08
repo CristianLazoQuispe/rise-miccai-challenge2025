@@ -1,6 +1,7 @@
 
 from monai.networks.nets import UNet
 from .seg_models.unest import UNesT133Adapter
+from .seg_models.unestpn import UNesT133FPNAdapter
 from .seg_models.swinunetr import AdaptedSwinUNETR
 from .seg_models.segresnet import AdaptedSegResNetV2
 import torch
@@ -25,6 +26,9 @@ def create_model(model_name="unet",device="cuda:5"):
         )
     elif model_name.lower() == "unest":
         return UNesT133Adapter(device=device, num_classes = 3)
+
+    elif model_name.lower() == "unestpn":
+        return UNesT133FPNAdapter(device=device, num_classes = 3)
 
     elif model_name.lower() == "swinunetr":
         return AdaptedSwinUNETR(
