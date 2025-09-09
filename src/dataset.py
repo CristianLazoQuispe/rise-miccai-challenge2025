@@ -80,12 +80,12 @@ def get_train_transforms_hard(SPACING,SPATIAL_SIZE):
                 mode="nearest", anti_aliasing=False),   
 
         # Ejemplo de augmentación: flips y rotaciones aleatorias
-        OneOf([
-            RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=0),  #  si usar
-            RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=1),  #  si usar
-            RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=2),  # si usar
-            RandRotate90d(keys=["image","label"], prob=0.5, max_k=3), # si usar
-        ]),
+        #OneOf([
+        RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=0),  #  si usar
+        RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=1),  #  si usar
+        RandFlipd(keys=["image","label"], prob=0.5, spatial_axis=2),  # si usar
+        RandRotate90d(keys=["image","label"], prob=0.5, max_k=3), # si usar
+        #]),
         OneOf([
 
             RandRotated( # si usar RandRotated,RandAffined
@@ -103,11 +103,11 @@ def get_train_transforms_hard(SPACING,SPATIAL_SIZE):
             ),
         ]),
 
-        OneOf([
-            RandBiasFieldd(keys=["image"], prob=0.5, coeff_range=(0.0,0.05)),
-            RandGaussianNoised(keys=["image"], prob=0.5, std=0.01),
-            RandAdjustContrastd(keys=["image"], prob=0.5, gamma=(0.7,1.5)),
-        ]),
+        #OneOf([
+        RandBiasFieldd(keys=["image"], prob=0.5, coeff_range=(0.1,0.5)),
+        RandGaussianNoised(keys=["image"], prob=0.5, std=0.01),
+        RandAdjustContrastd(keys=["image"], prob=0.5, gamma=(0.1,2)),
+        #]),
 
 
         EnsureTyped(keys=["image","label"], track_meta=True),

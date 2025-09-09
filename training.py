@@ -53,7 +53,7 @@ SPATIAL_SIZE = (96,96,96)
 def evaluate_model(model,fine_model, val_loader, device,prefix="val",loss_function=None,fold=None,epoch=None,full=True,show=False):
     # VALIDACIÓN
     roi_size = (96, 96, 96)
-    warmup_epochs = 80
+    warmup_epochs = 50
     roi_margin = 16
     thr_roi = 0.2
 
@@ -189,7 +189,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
                        batch_size=1, lr=1e-4, weight_decay=1e-5, root_dir="./models",device = "cuda:5",aug_method="lite",use_mixup= False,args={}):
 
     roi_size = (96, 96, 96)
-    warmup_epochs = 80
+    warmup_epochs = 50
     roi_margin = 16
     thr_roi = 0.2
 
@@ -340,6 +340,11 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
                             loss = loss_function(logits, y1)
 
                             # --- ROI derivado ---
+
+                            if epoch == warmup_epochs:
+                                best_dice = 0
+                                print("Refreshing best_dice!")
+
                             if epoch < warmup_epochs:
                                 bboxes = get_roi_bbox_from_labels(y, margin=roi_margin)
                             else:
