@@ -53,7 +53,7 @@ SPATIAL_SIZE = (96,96,96)
 def evaluate_model(model,fine_model, val_loader, device,prefix="val",loss_function=None,fold=None,epoch=None,full=True,show=False):
     # VALIDACIÓN
     roi_size = (96, 96, 96)
-    warmup_epochs = 50
+    warmup_epochs = 80
     roi_margin = 16
     thr_roi = 0.2
 
@@ -81,22 +81,24 @@ def evaluate_model(model,fine_model, val_loader, device,prefix="val",loss_functi
                 # --- ROI derivado ---
                 if epoch < warmup_epochs:
                     bboxes = get_roi_bbox_from_labels(val_lbl, margin=roi_margin)
+                    logits_fold = logits
+
                 else:
                     bboxes = get_roi_bbox_from_logits(logits, thr=thr_roi, margin=roi_margin)
 
-                logits_fold = torch.zeros_like(logits)
-                for i, bb in enumerate(bboxes):
-                    img_roi = crop_to_bbox(val_img[i:i+1], bb)
-                    lbl_roi = crop_to_bbox(val_lbl[i:i+1], bb)
-                    img_roi = resize_volume(img_roi, roi_size, mode="trilinear")
-                    lbl_roi = resize_volume(lbl_roi.float(), roi_size, mode="nearest").long().to(device)
-                    logits2 = fine_model(img_roi)
-                    loss_fine_total += loss_function(logits2, lbl_roi)
+                    logits_fold = torch.zeros_like(logits)
+                    for i, bb in enumerate(bboxes):
+                        img_roi = crop_to_bbox(val_img[i:i+1], bb)
+                        lbl_roi = crop_to_bbox(val_lbl[i:i+1], bb)
+                        img_roi = resize_volume(img_roi, roi_size, mode="trilinear")
+                        lbl_roi = resize_volume(lbl_roi.float(), roi_size, mode="nearest").long().to(device)
+                        logits2 = fine_model(img_roi)
+                        loss_fine_total += loss_function(logits2, lbl_roi)
 
 
-                    z0, y0, x0, z1, y1, x1 = bb
-                    logits2_up = resize_volume(logits2, (z1 - z0, y1 - y0, x1 - x0), mode="trilinear")[0]
-                    logits_fold[:, :, z0:z1, y0:y1, x0:x1] = logits2_up.cpu()
+                        z0, y0, x0, z1, y1, x1 = bb
+                        logits2_up = resize_volume(logits2, (z1 - z0, y1 - y0, x1 - x0), mode="trilinear")[0]
+                        logits_fold[:, :, z0:z1, y0:y1, x0:x1] = logits2_up.cpu()
 
                 loss = loss + loss_fine_total
 
@@ -187,7 +189,7 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
                        batch_size=1, lr=1e-4, weight_decay=1e-5, root_dir="./models",device = "cuda:5",aug_method="lite",use_mixup= False,args={}):
 
     roi_size = (96, 96, 96)
-    warmup_epochs = 50
+    warmup_epochs = 80
     roi_margin = 16
     thr_roi = 0.2
 
@@ -343,15 +345,15 @@ def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name=
                             else:
                                 bboxes = get_roi_bbox_from_logits(logits, thr=thr_roi, margin=roi_margin)
 
-                            for i, bb in enumerate(bboxes):
-                                img_roi = crop_to_bbox(x[i:i+1], bb)
-                                lbl_roi = crop_to_bbox(y[i:i+1], bb)
-                                img_roi = resize_volume(img_roi, roi_size, mode="trilinear")
-                                lbl_roi = resize_volume(lbl_roi.float(), roi_size, mode="nearest").long().to(device)
-                                logits2 = fine_model(img_roi)
-                                #print("logits2:",logits2)
-                                #print("lbl_roi:",lbl_roi)
-                                loss_fine_total += loss_function(logits2, lbl_roi)
+                                for i, bb in enumerate(bboxes):
+                                    img_roi = crop_to_bbox(x[i:i+1], bb)
+                                    lbl_roi = crop_to_bbox(y[i:i+1], bb)
+                                    img_roi = resize_volume(img_roi, roi_size, mode="trilinear")
+                                    lbl_roi = resize_volume(lbl_roi.float(), roi_size, mode="nearest").long().to(device)
+                                    logits2 = fine_model(img_roi)
+                                    #print("logits2:",logits2)
+                                    #print("lbl_roi:",lbl_roi)
+                                    loss_fine_total += loss_function(logits2, lbl_roi)
 
                             loss = loss + loss_fine_total
 
