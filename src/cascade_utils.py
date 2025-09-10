@@ -110,6 +110,7 @@ def get_roi_bbox_from_logits(logits: torch.Tensor, thr: float = 0.2, margin: int
     bboxes: List[Tuple[int,int,int,int,int,int]] = []
     B, D, H, W = foreground.shape
     for i in range(B):
+        print(foreground[i].mean(),foreground[i].min(),foreground[i].max(),foreground[i].std())
         mask = (foreground[i] > thr)
         coords = mask.nonzero(as_tuple=False)
         if coords.numel() == 0:

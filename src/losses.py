@@ -11,6 +11,39 @@ from monai.losses import DiceFocalLoss
 import torch
 import torch.nn.functional as F
 
+"""
+python training.py --model_name=efficientnet-b7 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite0-dice_ce_symmetry192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite0-dice_ce_symmetry192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry --dim=192
+
+python training.py --model_name=efficientnet-b7 --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite0-dice_ce192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite0-dice_ce192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce --dim=192
+
+python training.py --model_name=efficientnet-b7 --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite0-gdl_volbal192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite0-gdl_volbal192 --lr=1e-4 --weight_decay=1e-5 --loss_function=gdl_volbal --dim=192
+
+python training.py --model_name=efficientnet-b7 --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite0-dice_bootce192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite0-dice_bootce192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_bootce --dim=192
+
+python training.py --model_name=efficientnet-b7 --device=cuda:1 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite0-dice_surface192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite0-dice_surface192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_surface --dim=192
+
+python training.py --model_name=efficientnet-b7 --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite0-focal_tversky192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite0-focal_tversky192 --lr=1e-4 --weight_decay=1e-5 --loss_function=focal_tversky --dim=192
+
+
+
+
+python training.py --model_name=eff-b2 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-lite0-dice_ce_symmetry192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-b2-lite0-dice_ce_symmetry192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry --dim=192
+
+python training.py --model_name=eff-b2 --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-lite0-dice_ce192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-b2-lite0-dice_ce192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce --dim=192
+
+python training.py --model_name=eff-b2 --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-lite0-gdl_volbal192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-b2-lite0-gdl_volbal192 --lr=1e-4 --weight_decay=1e-5 --loss_function=gdl_volbal --dim=192
+
+python training.py --model_name=eff-b2 --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-lite0-dice_bootce192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-b2-lite0-dice_bootce192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_bootce --dim=192
+
+python training.py --model_name=eff-b2 --device=cuda:1 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-lite0-dice_surface192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-b2-lite0-dice_surface192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_surface --dim=192
+
+python training.py --model_name=eff-b2 --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-lite0-focal_tversky192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-b2-lite0-focal_tversky192 --lr=1e-4 --weight_decay=1e-5 --loss_function=focal_tversky --dim=192
+
+
+
+python training.py --model_name=eff-b2 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-lite0-focal_tversky192bin/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-b2-lite0-focal_tversky192bin --lr=1e-4 --weight_decay=1e-5 --loss_function=focal_tversky --dim=192
+
+"""
 
 def create_loss_function(loss_name="dice_ce"):
 
