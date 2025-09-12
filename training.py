@@ -1,25 +1,15 @@
-
-import os, copy, time
+import os, time
+import wandb
 import numpy as np
 import pandas as pd
-import nibabel as nib
-from sklearn.model_selection import KFold
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection import GroupKFold
-
 import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
-
-from monai.inferers import sliding_window_inference
+from sklearn.model_selection import GroupKFold, train_test_split
 import matplotlib.pyplot as plt
 import tqdm
 
-import sys
-import os
-
-#sys.path.append("../")
 from src.models import create_model
 from src import metrics
 from src import dataset
@@ -30,752 +20,823 @@ from src.cascade_utils import (
     crop_to_bbox,
     resize_volume,
 )
-
 from dotenv import load_dotenv
 
-os.environ["WANDB_DIR"] = "/data/cristian/paper_2025/wandb_dir"  # Aquí se guardarán los archivos temporales y logs
+os.environ["WANDB_DIR"] = "/data/cristian/paper_2025/wandb_dir"
 os.environ["WANDB_CACHE_DIR"] = "/data/cristian/paper_2025/wandb_dir"
 os.environ["WANDB_ARTIFACT_DIR"] = "/data/cristian/paper_2025/wandb_dir"
 
-
-
-################################################################################
-# TRANSFORMS
-################################################################################
-SPACING      = (1.0, 1.0, 1.0)
-#SPATIAL_SIZE = (96, 96, 96)
-#SPATIAL_SIZE = (96,96,96)
-
-################################################################################
-# ENTRENAMIENTO CON 5 FOLDS
-################################################################################
-
-def evaluate_model(model,fine_model, val_loader, device,prefix="val",loss_function=None,fold=None,epoch=None,full=True,show=False,dim=96,exp_name=""):
-    # VALIDACIÓN
-    roi_size = (dim,dim,dim)
-    roi_size_fine = (dim//2,dim//2,dim//2)
-    warmup_epochs = 100
-    roi_margin = 8
-    thr_roi = 0.2
-
-    model.eval()
-    fine_model.eval()
-    fold_metrics = {"dice_L": [], "dice_R": [], "hd_L": [], "hd_R": [],
-                    "hd95_L": [], "hd95_R": [], "assd_L": [], "assd_R": [],
-                    "rve_L": [], "rve_R": [],
-                    
-                    "dice_fine_L": [], "dice_fine_R": [], "hd_fine_L": [], "hd_fine_R": [],
-                    "hd95_fine_L": [], "hd95_fine_R": [], "assd_fine_L": [], "assd_fine_R": [],
-                    "rve_fine_L": [], "rve_fine_R": []}
-
-    fold_metrics_means = {}
-    epoch_loss = 0
-    epoch_loss_fine = torch.tensor(0.0).to(device)
-    with torch.no_grad():
-        pbar = tqdm.tqdm(val_loader, desc=f"{prefix} Fold {fold} Epoch {epoch}", leave=False, dynamic_ncols=True)
-        #for batch in val_loader:
-        for batch in pbar:        
-            val_img = batch["image"].to(device)
-            val_lbl = batch["label"].to(device)
-            loss_fine_total = torch.tensor(0.0).to(device)
-
-            with torch.cuda.amp.autocast(enabled=True):
-                #logits = sliding_window_inference(val_img, SPATIAL_SIZE, 2, model)
-                logits = model(val_img)
-                loss   = loss_function(logits, val_lbl)
-                logits_fold = logits
-
-                probs_proc_el1 = torch.softmax(logits, dim=1).cpu()
-                #print("1 probs_proc_el1:",probs_proc_el1.shape)
-                if True:
-                    # --- ROI derivado ---
-                    if epoch < warmup_epochs:
-                        bboxes = get_roi_bbox_from_labels(val_lbl, margin=roi_margin)
-                    else:
-                        bboxes = get_roi_bbox_from_logits(logits, thr=thr_roi, margin=roi_margin)
-
-                    logits_fold_fine = torch.zeros_like(logits)
-                    for i, bb in enumerate(bboxes):
-                        img_roi = crop_to_bbox(val_img[i:i+1], bb)
-                        lbl_roi = crop_to_bbox(val_lbl[i:i+1], bb)
-                        img_roi = resize_volume(img_roi, roi_size_fine, mode="trilinear")
-                        lbl_roi = resize_volume(lbl_roi.float(), roi_size_fine, mode="nearest").long().to(device)
-                        if lbl_roi.sum() == 0:
-                            continue
-
-                        logits2 = fine_model(img_roi)
-                        
-                        probs_proc_el2 = torch.softmax(logits2, dim=1).cpu()[0]
-                        pred_lab2 = np.argmax(probs_proc_el2, axis=0).astype(np.uint8)
-
-                        probs_proc_el1_aux = probs_proc_el1[i]
-                        pred_lab1 = np.argmax(probs_proc_el1_aux, axis=0).astype(np.uint8)
-                        #print("pred_lab1:",pred_lab1.shape)
-
-                        fig = plt.figure(figsize=(15,15))
-                        plt.subplot(1,6,1)
-                        plt.imshow(val_img[i:i+1][0,0,:,dim//2,:].cpu(),cmap="gray")
-                        plt.subplot(1,6,2)
-                        plt.imshow(img_roi[0,0,:,dim//4,:].cpu(),cmap="gray")
-                        plt.subplot(1,6,3)
-                        plt.imshow(lbl_roi[0,0,:,dim//4,:].cpu())
-                        plt.subplot(1,6,4)
-                        plt.imshow(pred_lab2[:,dim//4,:])
-                        plt.subplot(1,6,5)
-                        plt.imshow(val_lbl[0,0,:,dim//2,:].cpu())
-                        plt.subplot(1,6,6)
-                        plt.imshow(pred_lab1[:,dim//2,:])
-                        plt.show()
-                        plt.savefig(f"images/{exp_name}/{exp_name}_{prefix}_sine_wave_{i}.png")    
-                        plt.close()                      
-                        loss_fine_total += loss_function(logits2, lbl_roi)
-
-
-                        z0, y0, x0, z1, y1, x1 = bb
-                        logits2_up = resize_volume(logits2, (z1 - z0, y1 - y0, x1 - x0), mode="trilinear")[0]
-                        logits_fold_fine[i:i+1, :, z0:z1, y0:y1, x0:x1] = logits2_up.cpu()
-
-                #loss = loss + loss_fine_total
-
-            if torch.isfinite(loss):
-                epoch_loss += loss.item()
-            if torch.isfinite(loss_fine_total):
-                epoch_loss_fine += loss_fine_total.item()
-
-            # pred -> (B, C, D,H,W); argmax -> (B,D,H,W)
-            preds = torch.argmax(torch.softmax(logits_fold, dim=1), dim=1)
-            gts   = val_lbl.squeeze(1)
-
-            preds_np = preds.cpu().numpy()
-            gts_np   = gts.cpu().numpy()
-
-            # computar métricas por batch (B==1 aquí)
-            for p, g in zip(preds_np, gts_np):
-                # clases: 1 = L, 2 = R
-                for cls, key in [(1, "L"), (2, "R")]:
-                    dsc  = metrics.dice_score(p, g, cls)
-                    if full:
-                        hd   = metrics.hausdorff_distance(p, g, cls, percentile=100)
-                        hd95 = metrics.hausdorff_distance(p, g, cls, percentile=95)
-                        dist = metrics.assd(p, g, cls)
-                        vol  = metrics.rve(p, g, cls)
-
-                    if not np.isnan(dsc):  fold_metrics[f"dice_{key}"].append(dsc)
-                    if full:
-                        if not np.isnan(hd):   fold_metrics[f"hd_{key}"].append(hd)
-                        if not np.isnan(hd95): fold_metrics[f"hd95_{key}"].append(hd95)
-                        if not np.isnan(dist): fold_metrics[f"assd_{key}"].append(dist)
-                        if not np.isnan(vol):  fold_metrics[f"rve_{key}"].append(vol)
-
-
-
-
-            # pred -> (B, C, D,H,W); argmax -> (B,D,H,W)
-            preds = torch.argmax(torch.softmax(logits_fold_fine, dim=1), dim=1)
-            gts   = val_lbl.squeeze(1)
-
-            preds_np = preds.cpu().numpy()
-            gts_np   = gts.cpu().numpy()
-
-            # computar métricas por batch (B==1 aquí)
-            for p, g in zip(preds_np, gts_np):
-                # clases: 1 = L, 2 = R
-                for cls, key in [(1, "L"), (2, "R")]:
-                    dsc  = metrics.dice_score(p, g, cls)
-                    if full:
-                        hd   = metrics.hausdorff_distance(p, g, cls, percentile=100)
-                        hd95 = metrics.hausdorff_distance(p, g, cls, percentile=95)
-                        dist = metrics.assd(p, g, cls)
-                        vol  = metrics.rve(p, g, cls)
-
-                    if not np.isnan(dsc):  fold_metrics[f"dice_fine_{key}"].append(dsc)
-                    if full:
-                        if not np.isnan(hd):   fold_metrics[f"hd_fine_{key}"].append(hd)
-                        if not np.isnan(hd95): fold_metrics[f"hd95_fine_{key}"].append(hd95)
-                        if not np.isnan(dist): fold_metrics[f"assd_fine_{key}"].append(dist)
-                        if not np.isnan(vol):  fold_metrics[f"rve_fine_{key}"].append(vol)
-
-
-        epoch_loss /= len(val_loader)
-        epoch_loss_fine /= len(val_loader)
-
-    # promediamos métricas de este epoch
-    if len(fold_metrics["dice_L"]) > 0:
-        dice_L   = np.mean(fold_metrics["dice_L"])
-        dice_R   = np.mean(fold_metrics["dice_R"])
-        dice_avg = (dice_L + dice_R) / 2.0
-
-        if full:
-            hd_L   = np.mean(fold_metrics["hd_L"])
-            hd_R   = np.mean(fold_metrics["hd_R"])
-            hd_avg = (hd_L + hd_R) / 2.0
-            hd95_L = np.mean(fold_metrics["hd95_L"])
-            hd95_R = np.mean(fold_metrics["hd95_R"]) 
-            hd95_avg = (hd95_L + hd95_R) / 2.0
-            assd_L = np.mean(fold_metrics["assd_L"]) 
-            assd_R = np.mean(fold_metrics["assd_R"]) 
-            assd_avg = (assd_L + assd_R) / 2.0
-            rve_L  = np.mean(fold_metrics["rve_L"]) 
-            rve_R  = np.mean(fold_metrics["rve_R"]) 
-            rve_avg = (rve_L + rve_R) / 2.0
-        # fold metrics means with prefix
-        fold_metrics_means = {
-            f"{prefix}_dice_L": dice_L,
-            f"{prefix}_dice_R": dice_R,
-            f"{prefix}_dice_Avg": dice_avg,
-            f"{prefix}_loss": epoch_loss,
-            f"{prefix}_loss_fine": epoch_loss_fine
-        }
-        if full:
-            fold_metrics_means.update({
-            f"{prefix}_hd_L": hd_L,
-            f"{prefix}_hd_R": hd_R,
-            f"{prefix}_hd95_L": hd95_L,
-            f"{prefix}_hd95_R": hd95_R,
-            f"{prefix}_assd_L": assd_L,
-            f"{prefix}_assd_R": assd_R,
-            f"{prefix}_rve_L": rve_L,
-            f"{prefix}_rve_R": rve_R,
-
-            f"{prefix}_hd_Avg": hd_avg,
-            f"{prefix}_hd95_Avg": hd95_avg,
-            f"{prefix}_assd_Avg": assd_avg,
-            f"{prefix}_rve_Avg": rve_avg,
-            })
-
-
-    # promediamos métricas de este epoch
-    if len(fold_metrics["dice_fine_L"]) > 0:
-        dice_L   = np.mean(fold_metrics["dice_fine_L"])
-        dice_R   = np.mean(fold_metrics["dice_fine_R"])
-        dice_avg = (dice_L + dice_R) / 2.0
-
-        if full:
-            hd_L   = np.mean(fold_metrics["hd_fine_L"])
-            hd_R   = np.mean(fold_metrics["hd_fine_R"])
-            hd_avg = (hd_L + hd_R) / 2.0
-            hd95_L = np.mean(fold_metrics["hd95_fine_L"])
-            hd95_R = np.mean(fold_metrics["hd95_fine_R"]) 
-            hd95_avg = (hd95_L + hd95_R) / 2.0
-            assd_L = np.mean(fold_metrics["assd_fine_L"]) 
-            assd_R = np.mean(fold_metrics["assd_fine_R"]) 
-            assd_avg = (assd_L + assd_R) / 2.0
-            rve_L  = np.mean(fold_metrics["rve_fine_L"]) 
-            rve_R  = np.mean(fold_metrics["rve_fine_R"]) 
-            rve_avg = (rve_L + rve_R) / 2.0
-        # fold metrics means with prefix
-        fold_metrics_means.update({
-            f"{prefix}_dice_fine_L": dice_L,
-            f"{prefix}_dice_fine_R": dice_R,
-            f"{prefix}_dice_fine_Avg": dice_avg,
-        })
-
-        if full:
-            fold_metrics_means.update({
-            f"{prefix}_hd_fine_L": hd_L,
-            f"{prefix}_hd_fine_R": hd_R,
-            f"{prefix}_hd95_fine_L": hd95_L,
-            f"{prefix}_hd95_fine_R": hd95_R,
-            f"{prefix}_assd_fine_L": assd_L,
-            f"{prefix}_assd_fine_R": assd_R,
-            f"{prefix}_rve_fine_L": rve_L,
-            f"{prefix}_rve_fine_R": rve_R,
-
-            f"{prefix}_hd_fine_Avg": hd_avg,
-            f"{prefix}_hd95_fine_Avg": hd95_avg,
-            f"{prefix}_assd_fine_Avg": assd_avg,
-            f"{prefix}_rve_fine_Avg": rve_avg,
-            })            
-
-        if show:
-            print(f"{prefix} Dice L: {dice_L:.4f} Dice R: {dice_R:.4f} Dice Avg: {dice_avg:.4f}" ,end=" ")
-            if full:
-                print(f" HD L: {hd_L:.4f} HD R: {hd_R:.4f}"
-                    f"HD95 L: {hd95_L:.4f} HD95 R: {hd95_R:.4f}"
-                    f" ASSD L: {assd_L:.4f} ASSD R: {assd_R:.4f} RVE L: {rve_L:.4f} RVE R: {rve_R:.4f}",end= " ")
-            print("")
-    return fold_metrics_means
-
-def train_and_evaluate(df: pd.DataFrame, num_folds=5, num_epochs=50, model_name="unet",early_stopping_patience=50,
-                       batch_size=1, lr=1e-4, weight_decay=1e-5, root_dir="./models",device = "cuda:5",aug_method="lite",use_mixup= False,args={},dim=96):
-
-    roi_size = (dim,dim,dim)
-    roi_size_fine = (dim//2,dim//2,dim//2)
-    warmup_epochs = 100
-    roi_margin = 8
-    thr_roi = 0.2
-
-    device = torch.device(device if torch.cuda.is_available() else "cpu")
-    results = {"val_best": [], "test_best": []}
-
-    use_wandb = bool(os.getenv('WANDB_API_KEY')) and bool(os.getenv('PROJECT_WANDB'))
-
-    # Remove 10% of HF_hipp samples from df for backtesting, keep the rest for training
-    #df = df[df["source_label"] == "HF_hipp"].reset_index(drop=True)
+# Configuración
+SPACING = (1.0, 1.0, 1.0)
+def save_training_visualization(x, y, pred_base, pred_fine, epoch, batch_idx, 
+                               exp_name, phase="train", fold=1):
+    """Guarda visualización de las 3 vistas con slices que contengan hipocampo"""
     
-    list_ids = df["ID"].unique().tolist()
-    print(f"Total samples: {len(df)} | Unique IDs: {len(list_ids)}")
-    #train test split of IDs 10% of list_ids
-    list_ids_train, list_ids_backtest = train_test_split(list_ids, test_size=0.1, random_state=42)
-    df_backtest = df[(df["ID"].isin(list_ids_backtest))].reset_index(drop=True).copy()
-    df_train    = df[~(df["ID"].isin(list_ids_backtest))].reset_index(drop=True).copy()
-    print(f"Total samples: {len(df)} | Train samples: {len(df_train)} | Backtest samples: {len(df_backtest)}")
-
-    ids_train = set(df_train["ID"])
-    ids_val = set(df_backtest["ID"])
-    ids_comunes = ids_train.intersection(ids_val)
-    print(f"Train    size: {len(df_train)}")
-    print(f"BackTest size:   {len(df_backtest)}")
-    print(f"IDs en común (data leakage): {len(ids_comunes)}")
-    if len(ids_comunes) > 0:
-        print(f"IDs duplicados: {list(ids_comunes)}")
-
-
-    df = df_train
-    test_ds      = dataset.MRIDataset3D(df_backtest,   transform=dataset.get_val_transforms(SPACING=SPACING,SPATIAL_SIZE=roi_size))
-    test_loader  = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
+    # Crear directorio
+    vis_dir = f"images/{exp_name}/fold_{fold}/{phase}"
+    os.makedirs(vis_dir, exist_ok=True)
     
-    # Verifica que 'ID' existe
-    assert "ID" in df.columns, "Falta la columna 'ID'"
-
-    # Número de folds
-    num_folds = 5
-
-    # Inicializa columna de folds
-    df["fold"] = -1
-
-    # GroupKFold asegura que IDs no se mezclan entre train y val
-    gkf = GroupKFold(n_splits=num_folds)
-
-    for fold, (train_idx, val_idx) in enumerate(gkf.split(df, groups=df["ID"])):
+    # Convertir a numpy si es necesario
+    if isinstance(x, torch.Tensor):
+        x = x.cpu().numpy()
+    if isinstance(y, torch.Tensor):
+        y = y.cpu().numpy()
+    
+    # Encontrar slices con contenido en ground truth para cada vista
+    def find_best_slice(mask, axis):
+        """Encuentra el slice con más contenido de hipocampo"""
+        sums = []
+        for i in range(mask.shape[axis]):
+            if axis == 0:
+                slice_sum = np.sum(mask[i, :, :] > 0)
+            elif axis == 1:
+                slice_sum = np.sum(mask[:, i, :] > 0)
+            else:  # axis == 2
+                slice_sum = np.sum(mask[:, :, i] > 0)
+            sums.append(slice_sum)
         
-        use_train = True
-        run = None
-        if use_wandb and use_train:
-            import wandb
-            exp_name = args.get('experiment_name', 'rise_experiment')
-            run = wandb.init(
+        # Si no hay contenido, usar el centro
+        if max(sums) == 0:
+            return mask.shape[axis] // 2
+        
+        # Encontrar el slice con más contenido
+        best_idx = np.argmax(sums)
+        
+        # Si el mejor slice está muy al borde, usar uno más centrado
+        center = mask.shape[axis] // 2
+        if abs(best_idx - center) > mask.shape[axis] // 3:
+            # Buscar el slice más cercano al centro con contenido
+            for offset in range(mask.shape[axis] // 3):
+                if center + offset < len(sums) and sums[center + offset] > 0:
+                    return center + offset
+                if center - offset >= 0 and sums[center - offset] > 0:
+                    return center - offset
+        
+        return best_idx
+    
+    # Ground truth mask
+    gt_mask = y[0, 0] if y.ndim == 5 else y[0]
+    
+    # Encontrar mejores slices para cada vista
+    best_axial = find_best_slice(gt_mask, 0)
+    best_sagittal = find_best_slice(gt_mask, 1)
+    best_coronal = find_best_slice(gt_mask, 2)
+    
+    # Crear figura 3x6 (3 vistas x 6 visualizaciones)
+    fig, axes = plt.subplots(3, 6, figsize=(20, 12))
+    
+    # Preparar datos
+    img_vol = x[0, 0] if x.ndim == 5 else x[0]
+    pred_base_vol = pred_base[0] if pred_base is not None else np.zeros_like(gt_mask)
+    pred_fine_vol = pred_fine[0] if pred_fine is not None else np.zeros_like(gt_mask)
+    
+    # Función helper para plotear una fila
+    def plot_row(ax_row, img_slice, gt_slice, pred_base_slice, pred_fine_slice, view_name):
+        # Columna 1: Imagen original
+        ax_row[0].imshow(img_slice, cmap='gray')
+        ax_row[0].set_title(f'{view_name} - Input')
+        ax_row[0].axis('off')
+        
+        # Columna 2: Ground Truth
+        im = ax_row[1].imshow(gt_slice, cmap='viridis', vmin=0, vmax=2)
+        ax_row[1].set_title('Ground Truth')
+        ax_row[1].axis('off')
+        
+        # Columna 3: Predicción Base
+        ax_row[2].imshow(pred_base_slice, cmap='viridis', vmin=0, vmax=2)
+        ax_row[2].set_title('Base Prediction')
+        ax_row[2].axis('off')
+        
+        # Columna 4: Predicción Fine
+        ax_row[3].imshow(pred_fine_slice, cmap='viridis', vmin=0, vmax=2)
+        ax_row[3].set_title('Fine Prediction')
+        ax_row[3].axis('off')
+        
+        # Columna 5: Overlay GT
+        ax_row[4].imshow(img_slice, cmap='gray')
+        masked_gt = np.ma.masked_where(gt_slice == 0, gt_slice)
+        ax_row[4].imshow(masked_gt, cmap='jet', alpha=0.5, vmin=1, vmax=2)
+        ax_row[4].set_title('GT Overlay')
+        ax_row[4].axis('off')
+        
+        # Columna 6: Overlay Predicción
+        ax_row[5].imshow(img_slice, cmap='gray')
+        masked_pred = np.ma.masked_where(pred_fine_slice == 0, pred_fine_slice)
+        ax_row[5].imshow(masked_pred, cmap='jet', alpha=0.5, vmin=1, vmax=2)
+        ax_row[5].set_title('Prediction Overlay')
+        ax_row[5].axis('off')
+        
+        return im
+    
+    # Vista Axial (slice horizontal)
+    im = plot_row(
+        axes[0],
+        img_vol[best_axial, :, :],
+        gt_mask[best_axial, :, :],
+        pred_base_vol[best_axial, :, :],
+        pred_fine_vol[best_axial, :, :],
+        f'Axial (z={best_axial})'
+    )
+    
+    # Vista Sagital (slice lateral)
+    plot_row(
+        axes[1],
+        img_vol[:, best_sagittal, :],
+        gt_mask[:, best_sagittal, :],
+        pred_base_vol[:, best_sagittal, :],
+        pred_fine_vol[:, best_sagittal, :],
+        f'Sagittal (x={best_sagittal})'
+    )
+    
+    # Vista Coronal (slice frontal)
+    plot_row(
+        axes[2],
+        img_vol[:, :, best_coronal],
+        gt_mask[:, :, best_coronal],
+        pred_base_vol[:, :, best_coronal],
+        pred_fine_vol[:, :, best_coronal],
+        f'Coronal (y={best_coronal})'
+    )
+    
+    # Agregar colorbar
+    cbar_ax = fig.add_axes([0.92, 0.35, 0.02, 0.3])
+    cbar = fig.colorbar(im, cax=cbar_ax)
+    cbar.set_label('Label (0: BG, 1: Left, 2: Right)', rotation=270, labelpad=20)
+    
+    # Calcular métricas globales (no por slice)
+    dice_l_base = metrics.dice_score(pred_base_vol, gt_mask, 1)  if pred_base is not None else 0
+    dice_r_base = metrics.dice_score(pred_base_vol, gt_mask, 2)  if pred_base is not None else 0
+    dice_l_fine = metrics.dice_score(pred_fine_vol, gt_mask, 1)  if pred_fine is not None else 0
+    dice_r_fine = metrics.dice_score(pred_fine_vol, gt_mask, 2)  if pred_fine is not None else 0
+    
+    # Título con métricas
+    title = f'{phase.upper()} - Epoch {epoch} - Batch {batch_idx}\n'
+    title += f'Base Dice: L={dice_l_base:.3f} R={dice_r_base:.3f} | '
+    title += f'Fine Dice: L={dice_l_fine:.3f} R={dice_r_fine:.3f}'
+    
+    # Agregar información sobre contenido de GT
+    gt_voxels_l = np.sum(gt_mask == 1)
+    gt_voxels_r = np.sum(gt_mask == 2)
+    title += f'\nGT Voxels: L={gt_voxels_l} R={gt_voxels_r}'
+    
+    plt.suptitle(title, fontsize=14)
+    plt.tight_layout(rect=[0, 0, 0.9, 0.96])
+    
+    # Guardar
+    filename = f"{phase}_epoch{epoch:03d}_batch{batch_idx:03d}.png"
+    save_path = os.path.join(vis_dir, filename)
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Debug: imprimir información
+    print(f"Visualization saved: {save_path}")
+    print(f"  GT has content: L={gt_voxels_l>0}, R={gt_voxels_r>0}")
+    print(f"  Slices selected: Axial={best_axial}, Sagittal={best_sagittal}, Coronal={best_coronal}")
+    
+    return save_path
+
+# También agregar una función para crear GIF animado de todo el volumen
+def create_volume_animation(x, y, pred_base, pred_fine, epoch, exp_name, phase="val", fold=1):
+    """Crea una animación GIF mostrando todos los slices"""
+    import imageio
+    from PIL import Image
+    
+    vis_dir = f"images/{exp_name}/fold_{fold}/{phase}/animations"
+    os.makedirs(vis_dir, exist_ok=True)
+    
+    frames = []
+    
+    # Convertir a numpy
+    if isinstance(x, torch.Tensor):
+        x = x.cpu().numpy()
+    if isinstance(y, torch.Tensor):
+        y = y.cpu().numpy()
+    
+    img_vol = x[0, 0] if x.ndim == 5 else x[0]
+    gt_mask = y[0, 0] if y.ndim == 5 else y[0]
+    pred_vol = pred_fine[0] if pred_fine is not None else pred_base[0]
+    
+    # Crear frames para cada slice axial
+    for z in range(0, img_vol.shape[0], 2):  # Cada 2 slices para reducir tamaño
+        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+        
+        axes[0].imshow(img_vol[z], cmap='gray')
+        axes[0].set_title(f'Input (z={z})')
+        axes[0].axis('off')
+        
+        axes[1].imshow(gt_mask[z], cmap='viridis', vmin=0, vmax=2)
+        axes[1].set_title('Ground Truth')
+        axes[1].axis('off')
+        
+        axes[2].imshow(pred_vol[z], cmap='viridis', vmin=0, vmax=2)
+        axes[2].set_title('Prediction')
+        axes[2].axis('off')
+        
+        axes[3].imshow(img_vol[z], cmap='gray')
+        masked = np.ma.masked_where(pred_vol[z] == 0, pred_vol[z])
+        axes[3].imshow(masked, cmap='jet', alpha=0.5, vmin=1, vmax=2)
+        axes[3].set_title('Overlay')
+        axes[3].axis('off')
+        
+        plt.suptitle(f'{phase.upper()} - Epoch {epoch}')
+        plt.tight_layout()
+        
+        # Convertir a imagen
+        fig.canvas.draw()
+        image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+        image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        frames.append(image)
+        plt.close()
+    
+    # Guardar como GIF
+    gif_path = os.path.join(vis_dir, f"{phase}_epoch{epoch:03d}.gif")
+    imageio.mimsave(gif_path, frames, duration=0.1)
+    
+    return gif_path
+
+# Modificar la función de evaluación para usar la visualización mejorada
+def evaluate_base_model_with_vis(model, loader, device, loss_fn, epoch, exp_name, fold, use_wandb, run):
+    """Evaluación del modelo base con visualización mejorada"""
+    metrics = evaluate_base_model(model, loader, device, loss_fn)
+    
+    model.eval()
+    with torch.no_grad():
+        # Buscar un batch con contenido en GT
+        for i, batch in enumerate(loader):
+            x = batch["image"].to(device)
+            y = batch["label"].to(device)
+            
+            # Verificar si este batch tiene hipocampo
+            if y.sum() > 100:  # Tiene contenido significativo
+                logits = model(x)
+                pred = torch.argmax(torch.softmax(logits, dim=1), dim=1)
+                
+                img_path = save_training_visualization(
+                    x, y, pred.cpu().numpy(), None,
+                    epoch, i, exp_name, phase="val_base", fold=fold
+                )
+                
+                # Crear animación cada 20 epochs
+                if epoch % 20 == 0:
+                    gif_path = create_volume_animation(
+                        x, y, pred.cpu().numpy(), None,
+                        epoch, exp_name, phase="val_base", fold=fold
+                    )
+                    print(f"Animation saved: {gif_path}")
+                
+                if use_wandb and run is not None:
+                    run.log({
+                        f"val/visualization": wandb.Image(img_path),
+                        "epoch": epoch
+                    })
+                    if epoch % 20 == 0:
+                        run.log({
+                            f"val/animation": wandb.Video(gif_path),
+                            "epoch": epoch
+                        })
+                break
+    
+    return metrics
+
+
+def train_cascade_sequential(df, args):
+    """Entrenamiento secuencial con visualización"""
+    
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    results = {"val_best": [], "test_best": []}
+    
+    # Split train/test
+    list_ids = df["ID"].unique().tolist()
+    list_ids_train, list_ids_backtest = train_test_split(
+        list_ids, test_size=0.1, random_state=42
+    )
+    df_backtest = df[df["ID"].isin(list_ids_backtest)].reset_index(drop=True)
+    df_train = df[~df["ID"].isin(list_ids_backtest)].reset_index(drop=True)
+    
+    print(f"Train: {len(df_train)} | Test: {len(df_backtest)}")
+    
+    # Test dataset común
+    test_ds = dataset.MRIDataset3D(
+        df_backtest,
+        transform=dataset.get_val_transforms(SPACING, (args.dim, args.dim, args.dim))
+    )
+    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=4)
+    
+    # GroupKFold
+    gkf = GroupKFold(n_splits=args.num_folds)
+    df_train["fold"] = -1
+    
+    for fold, (train_idx, val_idx) in enumerate(gkf.split(df_train, groups=df_train["ID"])):
+        print(f"\n{'='*50}")
+        print(f"FOLD {fold+1}/{args.num_folds}")
+        print(f"{'='*50}")
+        
+        df_train.loc[val_idx, "fold"] = fold
+        df_train_fold = df_train[df_train["fold"] != fold].reset_index(drop=True)
+        df_val_fold = df_train[df_train["fold"] == fold].reset_index(drop=True)
+        
+        # Datasets
+        train_ds = dataset.MRIDataset3D(
+            df_train_fold,
+            transform=dataset.get_train_transforms_hippocampus(SPACING, (args.dim, args.dim, args.dim))
+        )
+        val_ds = dataset.MRIDataset3D(
+            df_val_fold,
+            transform=dataset.get_val_transforms(SPACING, (args.dim, args.dim, args.dim))
+        )
+        
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=8)
+        val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4)
+        
+        # Directorio para guardar modelos y visualizaciones
+        fold_dir = os.path.join(args.root_dir, f"fold_{fold+1}")
+        os.makedirs(fold_dir, exist_ok=True)
+        os.makedirs(f"images/{args.experiment_name}/fold_{fold+1}", exist_ok=True)
+        
+        # ========== ETAPA 1: ENTRENAR MODELO BASE ==========
+        print("\n>>> ETAPA 1: Entrenando modelo BASE")
+        
+        base_model = create_model(args.model_name, device).to(device)
+        loss_fn_base = losses.create_loss_function(args.loss_function)
+        optimizer_base = torch.optim.AdamW(
+            base_model.parameters(), 
+            lr=args.lr, 
+            weight_decay=args.weight_decay
+        )
+        scheduler_base = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer_base, mode='max', factor=0.9, patience=10
+        )
+        scaler_base = GradScaler()
+        
+        best_dice_base = 0.0
+        patience_counter = 0
+        warmup_epochs = min(100, args.num_epochs // 3)
+        
+        # Wandb para base model
+        if args.use_wandb:
+            exp_name = args.experiment_name
+            run_base = wandb.init(
                 project=os.getenv('PROJECT_WANDB'),
                 entity=os.getenv('ENTITY'),
-                name=f"{exp_name}_fold{fold}",
+                name=f"{args.experiment_name}_fold{fold}_base",
                 group=exp_name,
-                config=args,
+                config=vars(args),
                 save_code=True,
                 reinit=True,
             )
-
-        df.loc[val_idx, "fold"] = fold
-
-        df_train_fold = df[df["fold"] != fold].reset_index(drop=True)
-        df_val_fold = df[df["fold"] == fold].reset_index(drop=True)
-
-        ids_train = set(df_train_fold["ID"])
-        ids_val = set(df_val_fold["ID"])
-        ids_comunes = ids_train.intersection(ids_val)
-
-        print(f"\n===== Fold {fold+1}/{num_folds} =====")
-        print(f"Train size: {len(df_train_fold)}")
-        print(f"Val size:   {len(df_val_fold)}")
-        print(f"IDs en común (data leakage): {len(ids_comunes)}")
-        if len(ids_comunes) > 0:
-            print(f"IDs duplicados: {list(ids_comunes)}")
-    
-        #raise
-
-    
-        train_ds = dataset.MRIDataset3D(df_train_fold,
-                                         transform=dataset.get_train_transforms_lite(SPACING=SPACING,SPATIAL_SIZE=roi_size) if aug_method=="lite" else dataset.get_train_transforms_hard(SPACING=SPACING,SPATIAL_SIZE=roi_size))
-        val_ds   = dataset.MRIDataset3D(df_val_fold,   transform=dataset.get_val_transforms(SPACING=SPACING,SPATIAL_SIZE=roi_size))
-
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=16, pin_memory=True)
-        val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
-
-        model = create_model(model_name,device).to(device)
-        fine_model = create_model(model_name,device).to(device)
-        #loss_function = DiceCELoss(to_onehot_y=True, softmax=True)
-        loss_function = losses.create_loss_function(args.get('loss_function','dice_ce'))
-        loss_function_fine = losses.create_loss_function(args.get('loss_function','dice_ce'))
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        #optimizer = torch.optim.AdamW(list(model.parameters()) + list(fine_model.parameters()), lr=lr, weight_decay=weight_decay)
-        optimizer_fine = torch.optim.AdamW(fine_model.parameters(), lr=lr, weight_decay=weight_decay)
         
-        scheduler   = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.95, patience= args.get('scheduler_patience',5)
-        )
-        scheduler_fine   = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer_fine, mode='max', factor=0.95, patience= args.get('scheduler_patience',5)
-        )
-        scaler = GradScaler()
-        scaler_fine = GradScaler()
-
-        # para guardar el mejor modelo del fold
-        best_dice = 0.0
-        fold_dir = os.path.join(root_dir, f"fold_{fold+1}")
-        os.makedirs(fold_dir, exist_ok=True)
-
-        os.makedirs(f"images/{exp_name}", exist_ok=True)
-
-        if use_train:
-            torch.save(model.state_dict(), os.path.join(fold_dir, "best_model.pth"))
-            early_stopping_counter = 0
-            #early_stopping_patience = 50  # detener si no hay mejora en 10
-            for epoch in range(num_epochs):
-                model.train()
-                fine_model.train()
-                epoch_loss = 0
-                epoch_loss_fine = torch.tensor(0.0).to(device)
-                pbar = tqdm.tqdm(train_loader, desc=f"Train Fold {fold} Epoch {epoch}", leave=False, dynamic_ncols=True)
-                #for batch in train_loader:
-                for batch in pbar:
-                    x = batch["image"].to(device)
-                    y = batch["label"].to(device)
-                    loss_fine_total = torch.tensor(0.0).to(device)
-
-                    if y.ndim == 4:
-                        y = y.unsqueeze(1)  # Asegura shape [B, 1, D, H, W]
-
-                    use_mixup_now = use_mixup and (np.random.rand() < 0.5 and epoch < warmup_epochs)  # 50% de los batches
-
-                    if use_mixup_now:
-                        # --- Aplicamos MixUp ---
-                        lam = np.random.beta(0.4, 0.4)
-                        index = torch.randperm(x.size(0)).to(x.device)
-
-                        x_mix = lam * x + (1 - lam) * x[index]
-                        y1 = y
-                        y2 = y[index]
-                    else:
-                        # --- No MixUp ---
-                        x_mix = x
-                        y1 = y
-                        y2 = None  # no se usará
-
-                    optimizer.zero_grad(set_to_none=True)
-                    optimizer_fine.zero_grad(set_to_none=True)
-
-                    with torch.cuda.amp.autocast(enabled=True):
-                        logits = model(x_mix)
-
-                        if use_mixup_now:
-                            loss = lam * loss_function(logits, y1) + (1 - lam) * loss_function(logits, y2)
-                        else:
-                            loss = loss_function(logits, y1)
-                        
-                        probs_proc_el1 = torch.softmax(logits, dim=1).cpu()
-                        #print("1 probs_proc_el1:",probs_proc_el1.shape)
-                        if True:
-                            # --- ROI derivado ---
-
-                            if epoch == warmup_epochs:
-                                best_dice = 0
-                                print("Refreshing best_dice!")
-                            
-                            if epoch < warmup_epochs:
-                                bboxes = get_roi_bbox_from_labels(y, margin=roi_margin)
-                            else:
-                                bboxes = get_roi_bbox_from_logits(logits, thr=thr_roi, margin=roi_margin)
-                                #bboxes = get_roi_bbox_from_labels(y, margin=roi_margin)
-                                
-                            for i, bb in enumerate(bboxes):
-                                img_roi = crop_to_bbox(x[i:i+1], bb)
-                                lbl_roi = crop_to_bbox(y[i:i+1], bb)
-                                img_roi = resize_volume(img_roi, roi_size_fine, mode="trilinear")
-                                lbl_roi = resize_volume(lbl_roi.float(), roi_size_fine, mode="nearest").long().to(device)
-                                #print("img_roi:",img_roi.shape)
-                                logits2 = fine_model(img_roi)
-                                probs_proc_el2 = torch.softmax(logits2, dim=1).cpu()[0]
-                                pred_lab2 = np.argmax(probs_proc_el2, axis=0).astype(np.uint8)
-
-                                """
-                                print("img_roi:",img_roi.shape)
-                                print("x:",x[i:i+1].shape)
-                                print("y:",y[i:i+1].shape)
-                                print("logits2:",logits2.shape)
-                                print("pred_lab2:",pred_lab2.shape)
-                                print("lbl_roi:",lbl_roi.shape)
-                                """
-                                """
-                                probs_proc_el1_aux = probs_proc_el1[i]
-                                pred_lab1 = np.argmax(probs_proc_el1_aux, axis=0).astype(np.uint8)
-                                #print("pred_lab1:",pred_lab1.shape)
-                                fig = plt.figure(figsize=(18,18))
-                                plt.subplot(1,6,1)
-                                plt.imshow(x[i:i+1][0,0,:,dim//2,:].cpu(),cmap="gray")
-                                plt.subplot(1,6,2)
-                                plt.imshow(img_roi[0,0,:,dim//4,:].cpu(),cmap="gray")
-                                plt.subplot(1,6,3)
-                                plt.imshow(lbl_roi[0,0,:,dim//4,:].cpu())
-                                plt.subplot(1,6,4)
-                                plt.imshow(pred_lab2[:,dim//4,:])
-                                plt.subplot(1,6,5)
-                                plt.imshow(y[0,0,:,dim//2,:].cpu())
-                                plt.subplot(1,6,6)
-                                plt.imshow(pred_lab1[:,dim//2,:])
-                                plt.show()
-                                plt.savefig(f"images/{exp_name}/{exp_name}_train_sine_wave_{i}.png")    
-                                plt.close()     
-                                """                         
-                                loss_fine_total += loss_function_fine(logits2, lbl_roi)
-
-                            #loss = loss + loss_fine_total
-
-
-                    if torch.isfinite(loss):
-                        scaler.scale(loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
-
-                    if torch.isfinite(loss_fine_total):
-                        scaler_fine.scale(loss_fine_total).backward()
-                        scaler_fine.step(optimizer_fine)
-                        scaler_fine.update()
-
-                    
-                    if torch.isfinite(loss):
-                        epoch_loss += loss.item()
-                    if torch.isfinite(loss_fine_total):
-                        epoch_loss_fine += loss_fine_total.item()
-                epoch_loss /= len(train_loader)
-                epoch_loss_fine /= len(train_loader)
-                #print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f}")
-
-                val_fold_metrics = evaluate_model(model,fine_model, val_loader, device,prefix="val",loss_function=loss_function,fold=fold,epoch=epoch,full=False,dim=dim,exp_name=exp_name)
-                val_dice_avg = val_fold_metrics["val_dice_Avg"]
-                val_loss = val_fold_metrics["val_loss"]
-                val_loss_fine = val_fold_metrics["val_loss_fine"]
-                test_fold_metrics = evaluate_model(model,fine_model, test_loader, device,prefix="test",loss_function=loss_function,fold=fold,epoch=epoch,full=False,dim=dim,exp_name=exp_name)
-                test_loss = test_fold_metrics["test_loss"]
-                test_loss_fine = test_fold_metrics["test_loss_fine"]
-                test_dice_avg = test_fold_metrics["test_dice_Avg"]
-                print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_loss:.4f} Val Loss: {val_loss:.4f} Test Loss: {test_loss:.4f}"
-                    f" Val Dice Avg: {val_dice_avg:.4f}"
-                    f" Test Dice Avg: {test_dice_avg:.4f}"
-                    f" Train FineLoss: {epoch_loss_fine:.4f}"
-                    f" Val FineLoss: {val_loss_fine:.4f}"
-                    f" Test FineLoss: {test_loss_fine:.4f}")
+        for epoch in range(warmup_epochs):
+            # Training
+            base_model.train()
+            epoch_loss = 0
             
-                if use_wandb and run is not None:
-                    step_epoch = epoch  # local step for this fold's run
-                    log_data= {
-                        'epoch': epoch,
-                        'train/train_loss': epoch_loss,
-                        'val/val_loss': val_loss,
-                        'test/test_loss': test_loss,
-                        'train/train_loss_fine': epoch_loss_fine,
-                        'val/val_loss_fine': val_loss_fine,
-                        'test/test_loss_fine': test_loss_fine,
-                    }
-                    for key, value in val_fold_metrics.items():
-                        log_data[f'val/{key}'] = value
-                    for key, value in test_fold_metrics.items():
-                        log_data[f'test/{key}'] = value
-                    run.log(log_data, step=step_epoch)
-                # checkpoint: guarda si supera mejor dice promedio
-                scheduler.step(val_dice_avg)
-                scheduler_fine.step(val_dice_avg)
-                if val_dice_avg > best_dice:
-                    early_stopping_counter = 0  # reset counter si hay mejora
-                    best_dice = val_dice_avg
-                    torch.save(model.state_dict(), os.path.join(fold_dir, "best_model.pth"))
-                    torch.save(fine_model.state_dict(), os.path.join(fold_dir, "best_fine_model.pth"))
-                    print(f"Nuevo mejor modelo guardado - Avg Dice: {best_dice:.4f}",os.path.join(fold_dir, "best_model.pth"))
+            for batch_idx, batch in enumerate(tqdm.tqdm(train_loader, desc=f"Base Epoch {epoch+1}/{warmup_epochs}")):
+                x = batch["image"].to(device)
+                y = batch["label"].to(device)
+                
+                # MixUp opcional (solo primeras epochs)
+                use_mixup = args.use_mixup and epoch < 50 and np.random.rand() < 0.3
+                if use_mixup:
+                    lam = np.random.beta(0.4, 0.4)
+                    idx = torch.randperm(x.size(0)).to(device)
+                    x_mixed = lam * x + (1 - lam) * x[idx]
+                    y1, y2 = y, y[idx]
                 else:
-                    early_stopping_counter += 1
-                    if early_stopping_counter >= early_stopping_patience:
-                        print(f"No hay mejora en {early_stopping_patience} epochs. Deteniendo entrenamiento.")
-                        break
-                #else:
-                #    print("No se pudieron calcular métricas de validación (posiblemente máscaras vacías).")
-        # tras entrenamiento, evaluamos todo el fold (best checkpoint)
-        # cargamos mejor modelo
-        model.load_state_dict(torch.load(os.path.join(fold_dir, "best_model.pth")))
-        model.eval()
-        fine_model.load_state_dict(torch.load(os.path.join(fold_dir, "fine_best_model.pth")))
-        fine_model.eval()
-        val_fold_metrics = evaluate_model(model,fine_model, val_loader, device, prefix="val_best", loss_function=loss_function,show=True,full=True,dim=dim,exp_name=exp_name)
-        results["val_best"].append(val_fold_metrics)
-        test_fold_metrics = evaluate_model(model,fine_model, test_loader, device, prefix="test_best", loss_function=loss_function,show=True,full=True,dim=dim,exp_name=exp_name)
-        results["test_best"].append(test_fold_metrics)
-
-        
-        if use_wandb and run is not None:
-            step_epoch = epoch  # local step for this fold's run
-            log_data= {
-                'epoch': epoch,
-            }
-            for key, value in val_fold_metrics.items():
-                log_data[f'val_best/{key}'] = value
-            for key, value in test_fold_metrics.items():
-                log_data[f'test_best/{key}'] = value
-            run.log(log_data, step=step_epoch)
-            run.finish()
-
-
-
-    if use_wandb:
-        import wandb
-        exp_name = args.get('experiment_name', 'rise_experiment')
-        run = wandb.init(
-            project=os.getenv('PROJECT_WANDB'),
-            entity=os.getenv('ENTITY'),
-            name=f"{exp_name}_final",
-            group=exp_name,
-            config=args,
-            reinit=True,
-        )
-    # promediamos sobre folds
-    final = {"val_best":{},"test_best":{}}
-    for prefix in ["val_best","test_best"]:
-        llaves = results[prefix][0].keys()  # keys from first fold
-        vals = []
-        for results_fold in results[prefix]:
-            for llave in llaves:
-                if llave not in final[prefix]:
-                    final[prefix][llave] = []
-                if llave in results_fold:
-                    val = results_fold[llave]
-                    if isinstance(val, (int, float)):
-                        final[prefix][llave].append(val)
-                    elif isinstance(val, list):
-                        final[prefix][llave].extend(val)
+                    x_mixed = x
+                    y1 = y
+                
+                optimizer_base.zero_grad()
+                
+                with autocast():
+                    logits = base_model(x_mixed)
+                    if use_mixup:
+                        loss = lam * loss_fn_base(logits, y1) + (1 - lam) * loss_fn_base(logits, y2)
                     else:
-                        print(f"Tipo de dato no soportado para {llave}: {type(val)}")
-        # ahora promediamos los valores
-        for llave, vals in final[prefix].items():
-            if len(vals) > 0:
-                if isinstance(vals[0], (int, float)):
-                    final[prefix][llave] = np.mean(vals)
-                elif isinstance(vals[0], list):
-                    final[prefix][llave] = [np.mean([v[i] for v in vals]) for i in range(len(vals[0]))]
-                else:
-                    print(f"Tipo de dato no soportado para promediar {llave}: {type(vals[0])}")
+                        loss = loss_fn_base(logits, y1)
+                
+                scaler_base.scale(loss).backward()
+                torch.nn.utils.clip_grad_norm_(base_model.parameters(), 1.0)
+                scaler_base.step(optimizer_base)
+                scaler_base.update()
+                
+                epoch_loss += loss.item()
+                
+                # Visualización periódica (cada 50 batches)
+                if batch_idx % 50 == 0 and epoch % 10 == 0:
+                    with torch.no_grad():
+                        pred = torch.argmax(torch.softmax(logits, dim=1), dim=1)
+                        img_path = save_training_visualization(
+                            x, y1, pred.cpu().numpy(), None,
+                            epoch, batch_idx, args.experiment_name, 
+                            phase="train_base", fold=fold+1
+                        )
+                        if args.use_wandb:
+                            run_base.log({
+                                f"train/visualization": wandb.Image(img_path),
+                                "epoch": epoch
+                            })
+            
+            epoch_loss /= len(train_loader)
+            
+            # Validation
+            base_model.eval()
+            val_metrics = evaluate_base_model_with_vis(
+                base_model, val_loader, device, loss_fn_base,
+                epoch, args.experiment_name, fold+1, args.use_wandb, run_base if args.use_wandb else None
+            )
+            test_metrics = evaluate_base_model(base_model, test_loader, device, loss_fn_base)
+            
+            val_dice = val_metrics["dice_avg"]
+            val_loss = val_metrics["loss"]
+            test_loss = test_metrics["loss"]
+            
+            print(f"Base Epoch {epoch+1}: Train Loss={epoch_loss:.4f}, "
+                  f"Val Loss={val_loss:.4f}, Test Loss={test_loss:.4f}, "
+                  f"Val Dice={val_dice:.4f}, Test Dice={test_metrics['dice_avg']:.4f}")
+            
+            # Logging
+            if args.use_wandb:
+                run_base.log({
+                    "train/loss": epoch_loss,
+                    "val/dice_avg": val_dice,
+                    "val/dice_L": val_metrics["dice_L"],
+                    "val/dice_R": val_metrics["dice_R"],
+                    "test/dice_avg": test_metrics["dice_avg"],
+                    "epoch": epoch
+                })
+            
+            # Save best
+            scheduler_base.step(val_dice)
+            if val_dice > best_dice_base:
+                best_dice_base = val_dice
+                patience_counter = 0
+                torch.save(base_model.state_dict(), os.path.join(fold_dir, "best_model.pth"))
+                print(f"✓ Saved best base model: Dice={best_dice_base:.4f}")
             else:
-                final[prefix][llave] = np.nan
-
-        print("\n=== Resultado final promedio de 5 folds ===")
-        for metric in ["dice","hd","hd95","assd","rve"]:
-            for key in ["L","R","Avg"]:
-                llave = f"{prefix}_{metric}_{key}"
-                if llave in final:
-                    print(f"{llave}  : {final[llave]:.4f}")
-    print("final:", final)
-    if use_wandb and run is not None:
-        step_epoch = 0  # local step for this fold's run
-        log_data= {
-            'epoch': 0,
-        }
-        for key, value in final["val_best"].items():
-            log_data[f'val_best/{key}'] = value
-        for key, value in final["test_best"].items():
-            log_data[f'test_best/{key}'] = value
-        run.log(log_data, step=0)
-    run.finish()
-    return final
-
-################################################################################
-# EJECUCIÓN PRINCIPAL
-################################################################################
-
-# Entrenamiento y evaluación con UNet
-"""
-    UNET NO CONVERGE , DIFICIL DE ENTRENAR FROM SCRATCH, MEJOR CON PRETRAINED
-    python training.py --model_name=unet --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/unet_mixup_lite/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=unet_mixup_lite --lr=1e-4 --weight_decay=1e-5 --early_stopping_patience=60 
-
-    ###
-
-    python training.py --model_name=efficientnet-b7 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_hard_dice_ce_symmetry/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=hard --experiment_name=efficientnet-b7_mixup_hard_dice_ce_symmetry --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry
-
-    python training.py --model_name=efficientnet-b7 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_ce_edge/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_ce_edge --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_edge
+                patience_counter += 1
+                if patience_counter > 30:
+                    print("Early stopping base model")
+                    break
         
-    python training.py --model_name=efficientnet-b7 --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_gdl_volbal/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_gdl_volbal --lr=1e-4 --weight_decay=1e-5 --loss_function=gdl_volbal
-
-    python training.py --model_name=efficientnet-b7 --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_bootce/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_bootce --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_bootce
-
-    python training.py --model_name=efficientnet-b7 --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_focal_foreground_lovasz/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_focal_foreground_lovasz --lr=1e-4 --weight_decay=1e-5 --loss_function=focal_foreground_lovasz
-
-    python training.py --model_name=efficientnet-b7 --device=cuda:1 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_surface/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_surface --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_surface
+        if args.use_wandb:
+            run_base.finish()
         
-    python training.py --model_name=efficientnet-b7 --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_ce_symmetry/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_ce_symmetry --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry
-
-
-
-     #####
-    python training.py --model_name=efficientnet-b7 --device=cuda:5 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite-dice_ce_edge/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite-dice_ce_edge --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_edge
-    python training.py --model_name=efficientnet-b7 --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite-dice_ce_symmetry/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite-dice_ce_symmetry --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce_symmetry
-    python training.py --model_name=efficientnet-b7 --device=cuda:3 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite-dice_surface/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite-dice_surface --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_surface
-    python training.py --model_name=efficientnet-b7 --device=cuda:2 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite-focal_foreground_lovasz/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite-focal_foreground_lovasz --lr=1e-4 --weight_decay=1e-5 --loss_function=focal_foreground_lovasz
-    python training.py --model_name=efficientnet-b7 --device=cuda:1 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite-dice_bootce/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite-dice_bootce --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_bootce
-    python training.py --model_name=efficientnet-b7 --device=cuda:0 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-lite-gdl_volbal/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=eff-lite-gdl_volbal --lr=1e-4 --weight_decay=1e-5 --loss_function=gdl_volbal
-
-
+        # ========== ETAPA 2: ENTRENAR MODELO FINO ==========
+        print(f"\n>>> ETAPA 2: Entrenando modelo FINO (Base Dice={best_dice_base:.4f})")
+        
+        # Cargar mejor modelo base
+        base_model.load_state_dict(torch.load(os.path.join(fold_dir, "best_model.pth")))
+        base_model.eval()
+        for param in base_model.parameters():
+            param.requires_grad = False
+        
+        # Crear modelo fino
+        fine_model = create_model(args.model_name, device).to(device)
+        loss_fn_fine = losses.create_loss_function(args.loss_function)
+        optimizer_fine = torch.optim.AdamW(
+            fine_model.parameters(),
+            lr=args.lr * 0.5,
+            weight_decay=args.weight_decay
+        )
+        scheduler_fine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_fine, T_max=50, eta_min=1e-6
+        )
+        scaler_fine = GradScaler()
+        
+        best_dice_fine = 0.0
+        roi_margin = 16
+        roi_size_fine = (args.dim//2, args.dim//2, args.dim//2)
+        
+        # Wandb para fine model
+        if args.use_wandb:
+            run_fine = wandb.init(
+                project=os.getenv('PROJECT_WANDB'),
+                entity=os.getenv('ENTITY'),
+                name=f"{args.experiment_name}_fold{fold}_fine",
+                group=args.experiment_name,
+                config=vars(args),
+                reinit=True
+            )
+        
+        for epoch in range(50):
+            fine_model.train()
+            epoch_loss = 0
+            
+            for batch_idx, batch in enumerate(tqdm.tqdm(train_loader, desc=f"Fine Epoch {epoch+1}/50")):
+                x = batch["image"].to(device)
+                y = batch["label"].to(device)
+                
+                # Obtener ROIs del modelo base
+                with torch.no_grad():
+                    base_logits = base_model(x)
+                    bboxes = get_roi_bbox_from_logits(base_logits, thr=0.2, margin=roi_margin)
+                    base_pred = torch.argmax(torch.softmax(base_logits, dim=1), dim=1)
+                
+                # Entrenar en cada ROI
+                optimizer_fine.zero_grad()
+                total_loss = 0
+                valid_rois = 0
+                fine_preds = torch.zeros_like(base_pred)
+                
+                for i, bb in enumerate(bboxes):
+                    img_roi = crop_to_bbox(x[i:i+1], bb)
+                    lbl_roi = crop_to_bbox(y[i:i+1], bb)
+                    
+                    if lbl_roi.sum() < 10:
+                        continue
+                    
+                    img_roi = resize_volume(img_roi, roi_size_fine, mode="trilinear")
+                    lbl_roi = resize_volume(lbl_roi.float(), roi_size_fine, mode="nearest").long()
+                    
+                    with autocast():
+                        logits_fine = fine_model(img_roi)
+                        loss = loss_fn_fine(logits_fine, lbl_roi)
+                    
+                    # Guardar predicción para visualización
+                    if batch_idx % 50 == 0 and epoch % 10 == 0:
+                        with torch.no_grad():
+                            z0, y0, x0, z1, y1, x1 = bb
+                            pred_fine = torch.argmax(torch.softmax(logits_fine, dim=1), dim=1)
+                            pred_fine_up = resize_volume(
+                                pred_fine.unsqueeze(0).float(),
+                                (z1-z0, y1-y0, x1-x0),
+                                mode="nearest"
+                            )[0].long()
+                            fine_preds[i:i+1, z0:z1, y0:y1, x0:x1] = pred_fine_up
+                    
+                    total_loss += loss
+                    valid_rois += 1
+                
+                if valid_rois > 0:
+                    avg_loss = total_loss / valid_rois
+                    scaler_fine.scale(avg_loss).backward()
+                    torch.nn.utils.clip_grad_norm_(fine_model.parameters(), 1.0)
+                    scaler_fine.step(optimizer_fine)
+                    scaler_fine.update()
+                    
+                    epoch_loss += avg_loss.item()
+                    
+                    # Visualización periódica
+                    if batch_idx % 50 == 0 and epoch % 10 == 0:
+                        img_path = save_training_visualization(
+                            x, y, base_pred.cpu().numpy(), fine_preds.cpu().numpy(),
+                            epoch, batch_idx, args.experiment_name,
+                            phase="train_fine", fold=fold+1
+                        )
+                        if args.use_wandb:
+                            run_fine.log({
+                                f"train/visualization": wandb.Image(img_path),
+                                "epoch": epoch
+                            })
+            
+            epoch_loss /= len(train_loader)
+            scheduler_fine.step()
+            
+            # Validation con cascade
+            val_metrics = evaluate_cascade_with_vis(
+                base_model, fine_model, val_loader, device,
+                loss_fn_base, roi_margin, roi_size_fine, args.dim,
+                epoch, args.experiment_name, fold+1, args.use_wandb, 
+                run_fine if args.use_wandb else None
+            )
+            
+            val_dice_fine = val_metrics["dice_fine_avg"]
+            
+            print(f"Fine Epoch {epoch+1}: Loss={epoch_loss:.4f}, "
+                  f"Fine Dice={val_dice_fine:.4f}")
+            
+            # Logging
+            if args.use_wandb:
+                run_fine.log({
+                    "train/loss_fine": epoch_loss,
+                    "val/dice_fine_avg": val_dice_fine,
+                    "val/dice_fine_L": val_metrics["dice_fine_L"],
+                    "val/dice_fine_R": val_metrics["dice_fine_R"],
+                    "epoch": epoch
+                })
+            
+            # Save best fine model
+            if val_dice_fine > best_dice_fine:
+                best_dice_fine = val_dice_fine
+                torch.save(fine_model.state_dict(), os.path.join(fold_dir, "best_fine_model.pth"))
+                print(f"✓ Saved best fine model: Dice={best_dice_fine:.4f}")
+        
+        if args.use_wandb:
+            run_fine.finish()
+        
+        # Evaluación final con visualización
+        print(f"\n>>> Evaluación final Fold {fold+1}")
+        base_model.load_state_dict(torch.load(os.path.join(fold_dir, "best_model.pth")))
+        fine_model.load_state_dict(torch.load(os.path.join(fold_dir, "best_fine_model.pth")))
+        
+        final_metrics = evaluate_cascade_with_vis(
+            base_model, fine_model, test_loader, device,
+            loss_fn_base, roi_margin, roi_size_fine, args.dim,
+            999, args.experiment_name, fold+1, False, None  # epoch 999 para indicar final
+        )
+        
+        results["test_best"].append(final_metrics)
+        print(f"Final Test Dice: Base={final_metrics['dice_avg']:.4f}, "
+              f"Fine={final_metrics['dice_fine_avg']:.4f}")
     
+    return results
+
+def evaluate_base_model(model, loader, device, loss_fn):
+    """Evaluación simple del modelo base"""
+    model.eval()
+    all_dice = {"L": [], "R": []}
+    epoch_loss = 0.0
     
-"""
-
-
-
-
-import argparse
-from sklearn.model_selection import StratifiedKFold
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train 3D segmentation model for LISA Challenge")
-
-    parser.add_argument('--model_name', type=str, default="swinunetr", #, choices=["swinunetr", "unet","segresnet", "unest","unestpn"],
-                        help="Model architecture to use")
-    parser.add_argument('--batch_size', type=int, default=4, help="Batch size for training")
-    parser.add_argument('--early_stopping_patience', type=int, default=80, help="Batch size for training")
-    parser.add_argument('--experiment_name', type=str, default="base", help="Batch size for training")
-    parser.add_argument('--scheduler_patience', type=int, default=25, help="scheduler_patience")
-
-    parser.add_argument('--use_mixup', type=int, default=0, help="Batch size for training")
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["image"].to(device)
+            y = batch["label"].to(device)
+            
+            logits = model(x)
+            loss = loss_fn(logits, y)
+            epoch_loss += loss.item()
+            
+            pred = torch.argmax(torch.softmax(logits, dim=1), dim=1)
+            pred_np = pred.cpu().numpy()
+            y_np = y.squeeze(1).cpu().numpy()
+            
+            for p, g in zip(pred_np, y_np):
+                for cls, key in [(1, "L"), (2, "R")]:
+                    dice = metrics.dice_score(p, g, cls)
+                    if not np.isnan(dice):
+                        all_dice[key].append(dice)
     
-    parser.add_argument('--num_epochs', type=int, default=5000, help="Number of training epochs")
-    parser.add_argument('--aug_method', type=str, default="lite", help="Number of training epochs")
+    epoch_loss /= len(loader)
+    
+    return {
+        "loss": epoch_loss,
+        "dice_L": np.mean(all_dice["L"]) if all_dice["L"] else 0,
+        "dice_R": np.mean(all_dice["R"]) if all_dice["R"] else 0,
+        "dice_avg": np.mean(all_dice["L"] + all_dice["R"]) if (all_dice["L"] or all_dice["R"]) else 0
+    }
 
-    parser.add_argument('--loss_function', type=str, default="dice_ce", help="Number of training epochs")
+def evaluate_base_model_with_vis(model, loader, device, loss_fn, epoch, exp_name, fold, use_wandb, run):
+    """Evaluación del modelo base con visualización"""
+    metrics = evaluate_base_model(model, loader, device, loss_fn)
+    
+    # Visualizar un batch aleatorio
+    model.eval()
+    with torch.no_grad():
+        for i, batch in enumerate(loader):
+            if i == min(3, len(loader)-1):  # Visualizar el 3er batch o el último
+                x = batch["image"].to(device)
+                y = batch["label"].to(device)
+                logits = model(x)
+                pred = torch.argmax(torch.softmax(logits, dim=1), dim=1)
+                
+                img_path = save_training_visualization(
+                    x, y, pred.cpu().numpy(), None,
+                    epoch, i, exp_name, phase="val_base", fold=fold
+                )
+                
+                if use_wandb and run is not None:
+                    run.log({
+                        f"val/visualization": wandb.Image(img_path),
+                        "epoch": epoch
+                    })
+                break
+    
+    return metrics
 
-    parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate")
-    parser.add_argument('--weight_decay', type=float, default=1e-5, help="Weight decay (L2 regularization)")
-    parser.add_argument('--device', type=str, default="cuda:0", help="Device to use for training")
-    parser.add_argument('--num_folds', type=int, default=5, help="Number of cross-validation folds")
-    parser.add_argument('--root_dir', type=str, required=True, help="Directory to save models and logs")
-    parser.add_argument('--dim', type=int, default=96, help="Number of cross-validation folds")
+def evaluate_cascade(base_model, fine_model, loader, device, loss_fn, 
+                    roi_margin, roi_size_fine, dim):
+    """Evaluación del cascade completo"""
+    base_model.eval()
+    fine_model.eval()
+    
+    metrics_base = {"L": [], "R": []}
+    metrics_fine = {"L": [], "R": []}
+    
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["image"].to(device)
+            y = batch["label"].to(device)
+            
+            # Base prediction
+            logits_base = base_model(x)
+            bboxes = get_roi_bbox_from_logits(logits_base, thr=0.2, margin=roi_margin)
+            
+            # Fine prediction
+            logits_fine = torch.zeros_like(logits_base)
+            for i, bb in enumerate(bboxes):
+                img_roi = crop_to_bbox(x[i:i+1], bb)
+                img_roi = resize_volume(img_roi, roi_size_fine, mode="trilinear")
+                
+                logits2 = fine_model(img_roi)
+                
+                z0, y0, x0, z1, y1, x1 = bb
+                logits2_up = resize_volume(
+                    logits2, 
+                    (z1-z0, y1-y0, x1-x0), 
+                    mode="trilinear"
+                )[0]
+                logits_fine[i:i+1, :, z0:z1, y0:y1, x0:x1] = logits2_up.cpu()
+            
+            # Compute metrics
+            pred_base = torch.argmax(torch.softmax(logits_base, dim=1), dim=1).cpu().numpy()
+            pred_fine = torch.argmax(torch.softmax(logits_fine, dim=1), dim=1).cpu().numpy()
+            y_np = y.squeeze(1).cpu().numpy()
+            
+            for p_base, p_fine, g in zip(pred_base, pred_fine, y_np):
+                for cls, key in [(1, "L"), (2, "R")]:
+                    dice_base = metrics.dice_score(p_base, g, cls)
+                    dice_fine = metrics.dice_score(p_fine, g, cls)
+                    
+                    if not np.isnan(dice_base):
+                        metrics_base[key].append(dice_base )
+                    if not np.isnan(dice_fine):
+                        metrics_fine[key].append(dice_fine )
+    
+    return {
+        "dice_L": np.mean(metrics_base["L"]) if metrics_base["L"] else 0,
+        "dice_R": np.mean(metrics_base["R"]) if metrics_base["R"] else 0,
+        "dice_avg": np.mean(metrics_base["L"] + metrics_base["R"]) if metrics_base["L"] else 0,
+        "dice_fine_L": np.mean(metrics_fine["L"]) if metrics_fine["L"] else 0,
+        "dice_fine_R": np.mean(metrics_fine["R"]) if metrics_fine["R"] else 0,
+        "dice_fine_avg": np.mean(metrics_fine["L"] + metrics_fine["R"]) if metrics_fine["L"] else 0,
+    }
 
-    return parser.parse_args()
+def evaluate_cascade_with_vis(base_model, fine_model, loader, device, loss_fn,
+                             roi_margin, roi_size_fine, dim, epoch, exp_name, 
+                             fold, use_wandb, run):
+    """Evaluación del cascade con visualización"""
+    metrics = evaluate_cascade(base_model, fine_model, loader, device, loss_fn,
+                              roi_margin, roi_size_fine, dim)
+    
+    # Visualizar un batch
+    base_model.eval()
+    fine_model.eval()
+    
+    with torch.no_grad():
+        for i, batch in enumerate(loader):
+            if i == min(3, len(loader)-1):
+                x = batch["image"].to(device)
+                y = batch["label"].to(device)
+                
+                # Base prediction
+                logits_base = base_model(x)
+                pred_base = torch.argmax(torch.softmax(logits_base, dim=1), dim=1)
+                bboxes = get_roi_bbox_from_logits(logits_base, thr=0.2, margin=roi_margin)
+                
+                # Fine prediction
+                logits_fine = torch.zeros_like(logits_base)
+                for j, bb in enumerate(bboxes):
+                    img_roi = crop_to_bbox(x[j:j+1], bb)
+                    img_roi = resize_volume(img_roi, roi_size_fine, mode="trilinear")
+                    logits2 = fine_model(img_roi)
+                    
+                    z0, y0, x0, z1, y1, x1 = bb
+                    logits2_up = resize_volume(logits2, (z1-z0, y1-y0, x1-x0), mode="trilinear")[0]
+                    logits_fine[j:j+1, :, z0:z1, y0:y1, x0:x1] = logits2_up.cpu()
+                
+                pred_fine = torch.argmax(torch.softmax(logits_fine, dim=1), dim=1)
+                
+                phase = "test" if epoch == 999 else "val_cascade"
+                img_path = save_training_visualization(
+                    x, y, pred_base.cpu().numpy(), pred_fine.cpu().numpy(),
+                    epoch if epoch != 999 else "final", i, exp_name, phase=phase, fold=fold
+                )
+                
+                if use_wandb and run is not None:
+                    run.log({
+                        f"{phase}/visualization": wandb.Image(img_path),
+                        "epoch": epoch
+                    })
+                break
+    
+    return metrics
 
+# Main execution
 if __name__ == "__main__":
-    args = parse_args()
-
-    load_dotenv()
-
+    import argparse
+    from dotenv import load_dotenv
     
-    # Carga tu CSV con rutas de imágenes y máscaras
-    #python training.py --model_name=efficientnet-b7 --device=cuda:4 --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/efficientnet-b7_mixup_lite_dice_ce_fine_192/fold_models --num_epochs=5000 --num_folds=5 --use_mixup=1 --aug_method=lite --experiment_name=efficientnet-b7_mixup_lite_dice_ce_fine_192 --lr=1e-4 --weight_decay=1e-5 --loss_function=dice_ce --dim=192
-
-    # Debe tener columnas: 'filepath' y 'filepath_label'
-    csv_path = "results/preprocessed_data/task2/df_train_hipp.csv"
-    df = pd.read_csv(csv_path)
-    df.head()
-
-    final_metrics = train_and_evaluate(
-        df=df,
-        num_folds=args.num_folds,
-        num_epochs=args.num_epochs,
-        model_name=args.model_name,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        device=args.device,
-        root_dir=args.root_dir,
-        aug_method=args.aug_method,
-        use_mixup = args.use_mixup,
-        early_stopping_patience=args.early_stopping_patience,
-        args= vars(args).copy(),
-        dim=args.dim
-    )
-
-    print("Métricas finales:", final_metrics)
-    print("Métricas finales:", final_metrics)
-    print("hello")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_name', type=str, default="efficientnet-b7")
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--num_epochs', type=int, default=150)
+    parser.add_argument('--num_folds', type=int, default=5)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--weight_decay', type=float, default=1e-5)
+    parser.add_argument('--device', type=str, default="cuda:0")
+    parser.add_argument('--root_dir', type=str, required=True)
+    parser.add_argument('--dim', type=int, default=96)
+    parser.add_argument('--experiment_name', type=str, default="hippocampus_cascade")
+    parser.add_argument('--loss_function', type=str, default="dice_focal_hippocampus")
+    parser.add_argument('--use_mixup', type=int, default=1)
+    parser.add_argument('--use_wandb', type=int, default=1)
+    
+    args = parser.parse_args()
+    load_dotenv()
+    
+    # Load data
+    df = pd.read_csv("results/preprocessed_data/task2/df_train_hipp.csv")
+    
+    # Train
+    results = train_cascade_sequential(df, args)
+    print("\nFinal results:", results)

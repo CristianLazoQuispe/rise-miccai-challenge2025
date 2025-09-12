@@ -57,7 +57,7 @@ def create_model(model_name="unet",device="cuda:5"):
     elif model_name.lower() == "eff-b2":
 
         return smp.Unet(
-            encoder_name="efficientnet-b2", # choose encoder, e.g. resnet34
+            encoder_name="efficientnet-b1", # choose encoder, e.g. resnet34
             in_channels=1,                  # model input channels (1 for gray-scale volumes, 3 for RGB, etc.)
             classes=3,                      # model output channels (number of classes in your dataset)
         )
