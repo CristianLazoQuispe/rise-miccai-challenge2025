@@ -5,7 +5,7 @@ from monai.transforms import (
     CropForegroundd, Spacingd, ScaleIntensityRanged, Resized,
     RandFlipd, RandRotate90d, RandAffined, RandGaussianNoised,
     RandAdjustContrastd, EnsureTyped, RandShiftIntensityd,
-    RandScaleIntensityd, RandGaussianSmoothd, Lambdad
+    RandScaleIntensityd, RandGaussianSmoothd, Lambdad, MapTransform
 )
 import pandas as pd
 
@@ -14,7 +14,7 @@ def is_positive_background(img):
     return img > 0.5
 
 def get_train_transforms_hippocampus(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 96, 96)):
-    """Augmentaciones conservadoras para hipocampo pequeño"""
+    """Augmentaciones que PRESERVAN lateralidad L/R"""
     return Compose([
         LoadImaged(keys=["image","label"]),
         EnsureChannelFirstd(keys=["image","label"]),
@@ -23,7 +23,7 @@ def get_train_transforms_hippocampus(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 
         # Normalización robusta
         ScaleIntensityRanged(
             keys=["image"], 
-            a_min=0.0, a_max=16.0,  # Ajustado a tu rango de datos
+            a_min=0.0, a_max=16.0,
             b_min=0.0, b_max=1.0, 
             clip=True
         ),
@@ -32,7 +32,7 @@ def get_train_transforms_hippocampus(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 
         CropForegroundd(
             keys=["image","label"], 
             source_key="image",
-            margin=20,  # Margen alrededor del cerebro
+            margin=20,
             allow_smaller=True
         ),
         
@@ -56,21 +56,23 @@ def get_train_transforms_hippocampus(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 
             mode="nearest"
         ),
         
-        # === AUGMENTACIONES CONSERVADORAS ===
+        # ============ AUGMENTACIONES CORREGIDAS ============
         
-        # NO flip en eje lateral (preserva L/R)
-        RandFlipd(keys=["image","label"], prob=0.3, spatial_axis=0),  # Sagital OK
-        RandFlipd(keys=["image","label"], prob=0.3, spatial_axis=1),  # Coronal OK
-        # NO flip en eje 2 (axial) para no confundir L/R
+        # ❌ NO flip en eje 0 (sagital) - destruye L/R
+        # ✅ Flip en eje 1 (coronal) - anterior/posterior OK
+        RandFlipd(keys=["image","label"], prob=0.3, spatial_axis=1),
         
-        # Rotaciones pequeñas solo
+        # ✅ Flip en eje 2 (axial) - superior/inferior OK  
+        RandFlipd(keys=["image","label"], prob=0.3, spatial_axis=2),
+        
+        # Rotaciones MUY conservadoras - NO en eje que afecte L/R
         RandAffined(
             keys=["image","label"],
-            prob=0.4,
-            rotate_range=(0.1, 0.05, 0.05),  # Max 5.7° en x, 2.8° en y,z
-            translate_range=(5, 5, 5),  # Max 5 voxels shift
-            scale_range=(0.05, 0.05, 0.05),  # ±5% scaling
-            padding_mode="border",  # Importante: no zeros
+            prob=0.3,
+            rotate_range=(0, 0.05, 0.05),  # NO rotación en X (sagital)
+            translate_range=(3, 5, 5),      # Menos shift en X
+            scale_range=(0.03, 0.05, 0.05), # Menos scaling en X
+            padding_mode="border",
             mode=("bilinear","nearest")
         ),
         
@@ -90,7 +92,7 @@ def get_train_transforms_hippocampus(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 
     ])
 
 def get_val_transforms(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 96, 96)):
-    """Sin augmentación para validación - mantiene inversión"""
+    """Sin augmentación para validación"""
     return Compose([
         LoadImaged(keys=["image","label"]),
         EnsureChannelFirstd(keys=["image","label"]),
@@ -129,7 +131,7 @@ class MRIDataset3D(Dataset):
         for _, r in df.iterrows():
             item = {
                 "image": r["filepath"],
-                "image_path": r["filepath"]  # Preserva path para inference
+                "image_path": r["filepath"]
             }
             if "filepath_label" in r and pd.notna(r["filepath_label"]):
                 item["label"] = r["filepath_label"]

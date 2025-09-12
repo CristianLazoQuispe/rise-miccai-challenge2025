@@ -41,6 +41,34 @@ import torch.nn.functional as F
 from typing import List, Tuple
 
 
+
+
+# Agregar esta función a cascade_utils.py
+def correct_laterality_post(prediction):
+    """Corrige etiquetas L/R basándose en posición anatómica"""
+    import scipy.ndimage as ndimage
+    
+    # Encontrar componentes conectados
+    binary_mask = prediction > 0
+    labeled, n_features = ndimage.label(binary_mask)
+    
+    corrected = np.zeros_like(prediction)
+    
+    for i in range(1, n_features + 1):
+        component = (labeled == i)
+        
+        # Centro de masa del componente
+        com = ndimage.center_of_mass(component)
+        
+        # Determinar lateralidad por posición
+        # Asumiendo que el último eje (W) separa L/R
+        if com[2] < prediction.shape[2] / 2:
+            corrected[component] = 1  # Left hippocampus
+        else:
+            corrected[component] = 2  # Right hippocampus
+    
+    return corrected
+
 def get_roi_bbox_from_labels(labels: torch.Tensor, margin: int = 8) -> List[Tuple[int, int, int, int, int, int]]:
     """Compute a bounding box around the foreground voxels of each sample.
 
@@ -110,7 +138,7 @@ def get_roi_bbox_from_logits(logits: torch.Tensor, thr: float = 0.2, margin: int
     bboxes: List[Tuple[int,int,int,int,int,int]] = []
     B, D, H, W = foreground.shape
     for i in range(B):
-        print(foreground[i].mean(),foreground[i].min(),foreground[i].max(),foreground[i].std())
+        #print(foreground[i].mean(),foreground[i].min(),foreground[i].max(),foreground[i].std())
         mask = (foreground[i] > thr)
         coords = mask.nonzero(as_tuple=False)
         if coords.numel() == 0:
