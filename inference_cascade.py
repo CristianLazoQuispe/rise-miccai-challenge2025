@@ -257,7 +257,7 @@ def apply_tta_cascade(image, base_model, fine_model, roi_size, sw_batch,
                     print("1 PREDICT")
                     logits_roi = sliding_window_inference(
                         inputs=img_roi,
-                        roi_size=roi_size,#(96, 96, 96),
+                        roi_size=roi_size_fine,#(96, 96, 96),
                         sw_batch_size=sw_batch,
                         predictor=fine_model,
                         overlap=0.25,
@@ -296,7 +296,7 @@ def apply_tta_cascade(image, base_model, fine_model, roi_size, sw_batch,
             logits_fine = logits_fine.flip(3)
             # Si se flipeó coronalmente, intercambiar canales L/R
             #logits_fine = logits_fine[:, [0, 2, 1], ...]  
-        if fx: 
+        if fx:
             logits_fine = logits_fine.flip(2)
             # Si se flipeó sagitalmente, intercambiar canales L/R
             #logits_fine = logits_fine[:, [0, 2, 1], ...]
@@ -402,7 +402,7 @@ def run_cascade_inference(
     SPACING = (1.0, 1.0, 1.0)
     SPATIAL_SIZE = (dim, dim, dim)
     ROI_SIZE = SPATIAL_SIZE
-    ROI_SIZE_FINE = SPATIAL_SIZE  # Mismo tamaño, no reducir
+    ROI_SIZE_FINE = (dim//2, dim//2, dim//2) #SPATIAL_SIZE  # Mismo tamaño, no reducir
     SW_BATCH = 2
     ROI_MARGIN = 25
     
@@ -463,7 +463,7 @@ def run_cascade_inference(
                 
                 # Generar nombre de salida según formato
                 if submission_format == "LISAHF":
-                    out_name = f"LISAHF{subject_id}segprediction.nii.gz"
+                    out_name = f"LISA_TESTING_SEG_{subject_id}_hipp.nii.gz"#f"LISAHF{subject_id}segprediction.nii.gz"
                 else:
                     out_name = f"sub-{subject_id}_pred.nii.gz"
                 
@@ -730,11 +730,11 @@ if __name__ == "__main__":
 
 python inference_cascade.py \
   --test_csv ./results/preprocessed_data/task2/df_test_hipp.csv \
-  --models_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-dice_focal_spatial/fold_models \
-  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-dice_focal_spatial/submissions_fixed_v2 \
+  --models_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-dice_ce_balanced-v3/fold_models \
+  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-dice_ce_balanced-v3/submissions_fixed_v2 \
   --model_name eff-b2 \
   --dim 192 \
-  --use_tta 0 \
+  --use_tta 1 \
   --use_post 1 \
   --save_folds 0 \
   --format LISAHF \

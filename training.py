@@ -385,6 +385,8 @@ def train_cascade_sequential(df, args):
     
     # Split train/test con estratificación
     list_ids = df["ID"].unique().tolist()
+    print("*"*30)
+    print("LEN IDS : ",len(list_ids))
     list_ids_train, list_ids_backtest = train_test_split(
         list_ids, test_size=0.15, random_state=42
     )
@@ -1255,15 +1257,15 @@ def evaluate_cascade(base_model, fine_model, loader, device, loss_fn,
 
 python training.py \
   --model_name=eff-b2 \
-  --device=cuda:3 \
-  --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-dice_ce_spatial-v3/fold_models \
+  --device=cuda:0 \
+  --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-dice_ce_balanced-v3-pruebis/fold_models \
   --num_epochs=100 \
   --num_folds=3 \
   --use_mixup=1 \
-  --experiment_name=eff-b2-dice_ce_spatial \
+  --experiment_name=eff-b2-dice_ce_balanced \
   --lr=5e-4 \
   --weight_decay=1e-4 \
-  --loss_function=dice_ce_spatial \
+  --loss_function=dice_ce_balanced \
   --dim=192 \
   --batch_size=2 \
   --use_wandb=1 \
