@@ -58,6 +58,39 @@ def create_loss_function(loss_name="dice_focal_spatial"):
         
         return DiceFocalSpatialLoss()
     
+    elif loss_name == "balance_ce_focal":
+        class BalancedDiceFocalLoss(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.dice = DiceLoss(
+                    include_background=False,
+                    to_onehot_y=True,
+                    softmax=True,
+                    squared_pred=True
+                )
+                # Pesos balanceados basados en frecuencia
+                self.focal = FocalLoss(
+                    include_background=False,
+                    to_onehot_y=True,
+                    gamma=2.0,  # Reducir gamma para no sobre-penalizar
+                    weight=torch.tensor([1.2, 1.5])  # Más peso al R que falla más
+                )
+                
+            def forward(self, logits, targets):
+                # Calcular dice por clase para balance dinámico
+                dice_loss = self.dice(logits, targets)
+                focal_loss = self.focal(logits, targets)
+                
+                # Balance adaptativo
+                with torch.no_grad():
+                    pred = torch.argmax(logits, dim=1)
+                    n_left = (pred == 1).sum()
+                    n_right = (pred == 2).sum()
+                    balance_factor = torch.clamp(n_left / (n_right + 1e-5), 0.5, 2.0)
+                
+                return dice_loss + focal_loss * balance_factor
+        return BalancedDiceFocalLoss()
+
     elif loss_name == "dice_ce_spatial":
         """DiceCE con constraint espacial"""
         class DiceCESpatialLoss(nn.Module):

@@ -4,7 +4,7 @@ from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Orientationd,
     CropForegroundd, Spacingd, ScaleIntensityRanged, Resized,
     RandFlipd, RandRotate90d, RandAffined, RandGaussianNoised,
-    RandAdjustContrastd, EnsureTyped, RandShiftIntensityd,
+    RandAdjustContrastd, EnsureTyped, RandShiftIntensityd,        RandBiasFieldd,RandSimulateLowResolutiond,RandLambdad,
     RandScaleIntensityd, RandGaussianSmoothd, Lambdad, MapTransform
 )
 import pandas as pd
@@ -87,7 +87,25 @@ def get_train_transforms_hippocampus(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 
             sigma_y=(0.5, 1.0),
             sigma_z=(0.5, 1.0)
         ),
+
+
+        # Agregar augmentaciones más fuertes
+        RandGaussianNoised(keys=["image"], prob=0.3, mean=0.0, std=0.02),
+        RandAdjustContrastd(keys=["image"], prob=0.3, gamma=(0.7, 1.5)),
+        RandBiasFieldd(keys=["image"], prob=0.2),
+        RandSimulateLowResolutiond(
+            keys=["image"], 
+            prob=0.25,
+            zoom_range=(0.5, 1.0)
+        ),
         
+        # MixUp 3D más agresivo
+        #RandLambdad(
+        #    keys=["image", "label"],
+        #    prob=0.5,
+        #    lambda_range=(0.5, 1.0)
+        #),
+
         EnsureTyped(keys=["image","label"], track_meta=True),
     ])
 
