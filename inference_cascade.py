@@ -131,7 +131,8 @@ def load_cascade_models(models_root, model_name, device):
                 fold_dirs.append(p)
             else:
                 print(f"⚠ Warning: Missing models in {p}")
-    
+            break
+
     if len(fold_dirs) == 0:
         raise ValueError(f"No valid fold directories found in {models_root}")
     
@@ -177,7 +178,7 @@ def apply_tta_cascade(image, base_model, fine_model, roi_size, sw_batch,
                 (0, 0, 0),  # Original - sin flips
                 (0, 1, 0),  # Flip coronal (anterior-posterior) - SEGURO
                 (0, 0, 1),  # Flip axial (superior-inferior) - SEGURO
-                (0, 1, 1),  # Flip coronal + axial - SEGURO
+                #(0, 1, 1),  # Flip coronal + axial - SEGURO
             ]
         else:
             tta_configs = tta_flips
@@ -294,11 +295,11 @@ def apply_tta_cascade(image, base_model, fine_model, roi_size, sw_batch,
         if fy: 
             logits_fine = logits_fine.flip(3)
             # Si se flipeó coronalmente, intercambiar canales L/R
-            logits_fine = logits_fine[:, [0, 2, 1], ...]  
+            #logits_fine = logits_fine[:, [0, 2, 1], ...]  
         if fx: 
             logits_fine = logits_fine.flip(2)
             # Si se flipeó sagitalmente, intercambiar canales L/R
-            logits_fine = logits_fine[:, [0, 2, 1], ...]
+            #logits_fine = logits_fine[:, [0, 2, 1], ...]
         
         # Softmax y guardar
         probs = torch.softmax(logits_fine, dim=1)
@@ -729,8 +730,8 @@ if __name__ == "__main__":
 
 python inference_cascade.py \
   --test_csv ./results/preprocessed_data/task2/df_test_hipp.csv \
-  --models_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-dice_ce_balanced/fold_models \
-  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-dice_ce_balanced/submissions_fixed_v2 \
+  --models_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-dice_focal_spatial/fold_models \
+  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-dice_focal_spatial/submissions_fixed_v2 \
   --model_name eff-b2 \
   --dim 192 \
   --use_tta 0 \

@@ -9,6 +9,86 @@ from monai.transforms import (
 )
 import pandas as pd
 
+from monai.transforms import MapTransform
+import numpy as np
+import torch
+from scipy import ndimage
+
+class MorphologicalCleanupMulticlassd(MapTransform):
+    """
+    Limpieza morfológica para labels multiclase (0, 1, 2)
+    """
+    def __init__(self, keys, min_size=10, closing_size=1, opening_size=0):
+        super().__init__(keys)
+        self.min_size = min_size
+        self.closing_size = closing_size
+        self.opening_size = opening_size
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.keys:
+            if key in d:
+                d[key] = self._clean_multiclass_mask(d[key])
+        return d
+    
+    def _clean_multiclass_mask(self, mask):
+        """Procesa máscara con clases 0, 1, 2"""
+        if isinstance(mask, torch.Tensor):
+            mask_np = mask.cpu().numpy()
+            return_torch = True
+            device = mask.device
+        else:
+            mask_np = np.array(mask)
+            return_torch = False
+        
+        # Procesar cada clase por separado (1 y 2, el 0 es background)
+        cleaned_mask = np.zeros_like(mask_np)
+        
+        for class_id in [1, 2]:
+            # Crear máscara binaria para esta clase
+            class_mask = (mask_np == class_id).astype(np.uint8)
+            
+            # Si es 4D [C, D, H, W], procesar el canal correcto
+            if class_mask.ndim == 4:
+                for c in range(class_mask.shape[0]):
+                    class_mask[c] = self._process_binary_mask(class_mask[c])
+            else:
+                class_mask = self._process_binary_mask(class_mask)
+            
+            # Asignar de vuelta la clase limpia
+            cleaned_mask[class_mask > 0] = class_id
+        
+        if return_torch:
+            return torch.from_numpy(cleaned_mask).to(device)
+        return cleaned_mask
+    
+    def _process_binary_mask(self, binary_mask):
+        """Procesa una máscara binaria 3D"""
+        if np.sum(binary_mask) == 0:  # Si no hay nada, retornar vacío
+            return binary_mask
+        
+        # Closing para cerrar huecos
+        if self.closing_size > 0:
+            struct = ndimage.generate_binary_structure(3, 1)
+            binary_mask = ndimage.binary_closing(binary_mask, struct, iterations=self.closing_size)
+        
+        # Opening para eliminar ruido
+        if self.opening_size > 0:
+            struct = ndimage.generate_binary_structure(3, 1)
+            binary_mask = ndimage.binary_opening(binary_mask, struct, iterations=self.opening_size)
+        
+        # Eliminar componentes pequeños
+        if self.min_size > 0:
+            labeled, num_features = ndimage.label(binary_mask)
+            if num_features > 0:
+                component_sizes = np.bincount(labeled.ravel())
+                small_components = np.where(component_sizes[1:] < self.min_size)[0] + 1
+                for comp in small_components:
+                    binary_mask[labeled == comp] = 0
+        
+        return binary_mask.astype(np.uint8)
+
+
 def is_positive_background(img):
     """Returns boolean where positive values are True"""
     return img > 0.5
@@ -56,6 +136,13 @@ def get_train_transforms_hippocampus(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 
             mode="nearest"
         ),
         
+        # ===== AGREGAR AQUÍ LA LIMPIEZA MORFOLÓGICA =====
+        MorphologicalCleanupMulticlassd(
+            keys=["label"],
+            min_size=5,      # Pequeño para training, mantener variabilidad
+            closing_size=1,  # Suave
+            opening_size=0   # Sin opening en training
+        ),        
         # ============ AUGMENTACIONES CORREGIDAS ============
         
         # ❌ NO flip en eje 0 (sagital) - destruye L/R
@@ -138,7 +225,14 @@ def get_val_transforms(SPACING=(1.0, 1.0, 1.0), SPATIAL_SIZE=(96, 96, 96)):
         
         Resized(keys=["image"], spatial_size=SPATIAL_SIZE, mode="trilinear"),
         Resized(keys=["label"], spatial_size=SPATIAL_SIZE, mode="nearest"),
-        
+        # ===== AGREGAR AQUÍ TAMBIÉN (más agresivo para val) =====
+        MorphologicalCleanupMulticlassd(
+            keys=["label"],
+            min_size=10,     # Más estricto
+            closing_size=2,  # Más agresivo
+            opening_size=1   # Con opening
+        ),
+
         EnsureTyped(keys=["image","label"], track_meta=True),
     ])
 

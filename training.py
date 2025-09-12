@@ -709,7 +709,7 @@ def train_cascade_sequential(df, args):
             print("  Initialized fine model with base model weights")
         
         # Simple loss for fine-tuning
-        loss_fn_fine = losses.create_loss_function("focal_tversky_balanced_balanced")
+        loss_fn_fine = losses.create_loss_function("dice_ce_spatial_balanced")
         
         optimizer_fine = torch.optim.AdamW(
             fine_model.parameters(),
@@ -729,7 +729,7 @@ def train_cascade_sequential(df, args):
         # Fine-tuning parameters
         best_dice_fine = 0.0
         roi_margin = 25
-        roi_size_fine = (args.dim, args.dim, args.dim)  # Same size, no reduction
+        roi_size_fine = (args.dim//2, args.dim//2, args.dim//2)  # Same size, no reduction
         MAX_ROIS_PER_BATCH = 4
         MIN_VOXELS_IN_ROI = 100
         
@@ -1256,14 +1256,14 @@ def evaluate_cascade(base_model, fine_model, loader, device, loss_fn,
 python training.py \
   --model_name=eff-b2 \
   --device=cuda:3 \
-  --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-focal_tversky_balanced/fold_models \
-  --num_epochs=60 \
-  --num_folds=5 \
+  --root_dir=/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-b2-dice_ce_spatial-v3/fold_models \
+  --num_epochs=100 \
+  --num_folds=3 \
   --use_mixup=1 \
-  --experiment_name=eff-focal_tversky_balanced \
+  --experiment_name=eff-b2-dice_ce_spatial \
   --lr=5e-4 \
   --weight_decay=1e-4 \
-  --loss_function=focal_tversky_balanced \
+  --loss_function=dice_ce_spatial \
   --dim=192 \
   --batch_size=2 \
   --use_wandb=1 \
@@ -1288,7 +1288,7 @@ if __name__ == "__main__":
     parser.add_argument('--root_dir', type=str, required=True)
     parser.add_argument('--dim', type=int, default=192)
     parser.add_argument('--experiment_name', type=str, required=True)
-    parser.add_argument('--loss_function', type=str, default="focal_tversky_balanced_balanced")
+    parser.add_argument('--loss_function', type=str, default="dice_ce_spatial_balanced")
     parser.add_argument('--use_mixup', type=int, default=1)
     parser.add_argument('--use_wandb', type=int, default=1)
     parser.add_argument('--use_deep_supervision', type=int, default=0)

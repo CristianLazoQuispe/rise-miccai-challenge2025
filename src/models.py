@@ -45,7 +45,7 @@ def create_model(model_name="unet",device="cuda:5"):
         )
     	
 
-    elif model_name.lower() == "efficientnet-b7":
+    elif model_name.lower() == "eff-b7":
 
         return smp.Unet(
             encoder_name="efficientnet-b7", # choose encoder, e.g. resnet34
