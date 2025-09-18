@@ -1,181 +1,289 @@
-from monai.losses import DiceCELoss
-from monai.losses import DiceCELoss
-from monai.losses import GeneralizedDiceLoss, FocalLoss
-from monai.losses import DiceFocalLoss
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from monai.losses import DiceCELoss, HausdorffDTLoss
-import torch.nn.functional as F
-from monai.losses import DiceFocalLoss
-import torch
-import torch.nn.functional as F
+from monai.losses import DiceLoss, FocalLoss, TverskyLoss, DiceCELoss
 
-
-def create_loss_function(loss_name="dice_ce"):
-
-    if loss_name == "dice_ce":
-        return DiceCELoss(to_onehot_y=True, softmax=True)
+def create_loss_function(loss_name="dice_ce_balanced"):
+    """Loss functions optimizadas para hippocampus segmentation - Device agnostic"""
+    
+    if loss_name == "dice_ce_balanced":
+        """DiceCE balanceado - MÁS ESTABLE Y RECOMENDADO"""
+        class BalancedDiceCELoss(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.dice = DiceLoss(
+                    include_background=False,
+                    to_onehot_y=True,
+                    softmax=True,
+                    batch=True,
+                    smooth_nr=1e-5,
+                    smooth_dr=1e-5
+                )
+                # Pesos se crearán dinámicamente en el device correcto
+                self.ce_weight = None
+                
+            def forward(self, logits, targets):
+                # Crear pesos en el mismo device que los logits
+                if self.ce_weight is None or self.ce_weight.device != logits.device:
+                    self.ce_weight = torch.tensor([0.1, 1.2, 1.2], device=logits.device, dtype=logits.dtype)
+                
+                # Dice loss
+                dice_loss = self.dice(logits, targets)
+                
+                # Cross entropy con pesos
+                ce_loss = F.cross_entropy(
+                    logits, 
+                    targets.squeeze(1).long(), 
+                    weight=self.ce_weight
+                )
+                
+                # Combinación balanceada
+                return dice_loss + 0.5 * ce_loss
         
-    elif loss_name == "dice_ce_hd95":
-        # y debe ser [B,1,D,H,W] con índices {0,1,2}
-        dicece = DiceCELoss(
-            to_onehot_y=True,    # convierte la GT a one-hot
-            softmax=True,        # aplica softmax a logits
-            include_background=True
-        )
-
-        # Aproxima Hausdorff via Distance Transform (no hay "percentile" aquí)
-        hd = HausdorffDTLoss(
-            alpha=2.0,                 # potencia del DT (2.0 suele ir bien)
-            include_background=False,  # sólo L y R
+        return BalancedDiceCELoss()
+    
+    elif loss_name == "dice_focal_spatial":
+        """Versión ARREGLADA del dice_focal_spatial"""
+        class DiceFocalSpatialLoss(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.dice = DiceLoss(
+                    include_background=False,
+                    to_onehot_y=True,
+                    softmax=True,
+                    batch=True
+                )
+                # FocalLoss sin weights inicialmente
+                self.focal = FocalLoss(
+                    include_background=True,
+                    to_onehot_y=True,
+                    use_softmax=True,
+                    gamma=2.0
+                )
+                self.focal_weight = None
+            
+            def forward(self, logits, targets):
+                # Crear pesos en el mismo device que los logits
+                if self.focal_weight is None or self.focal_weight.device != logits.device:
+                    self.focal_weight = torch.tensor([0.1, 1.2, 1.2], device=logits.device, dtype=logits.dtype)
+                
+                # Losses base
+                dice_loss = self.dice(logits, targets)
+                
+                # Actualizar weights del FocalLoss
+                self.focal.weight = self.focal_weight
+                focal_loss = self.focal(logits, targets)
+                
+                # Penalización espacial (simplificada)
+                B, C, D, H, W = logits.shape
+                probs = torch.softmax(logits, dim=1)
+                center_w = W // 2
+                
+                spatial_penalty = torch.tensor(0.0, device=logits.device)
+                # Penalizar left en lado derecho
+                if C > 1:
+                    left_wrong = probs[:, 1, :, :, center_w:].mean()
+                    spatial_penalty = spatial_penalty + left_wrong * 0.3
+                # Penalizar right en lado izquierdo
+                if C > 2:
+                    right_wrong = probs[:, 2, :, :, :center_w].mean()
+                    spatial_penalty = spatial_penalty + right_wrong * 0.3
+                
+                # Combinación con pesos ajustados
+                return 0.5 * dice_loss + 0.3 * focal_loss + 0.2 * spatial_penalty
+        
+        return DiceFocalSpatialLoss()
+    
+    elif loss_name == "focal_tversky_balanced":
+        """Focal Tversky para estructuras pequeñas"""
+        class FocalTverskyBalanced(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.alpha = 0.7  # Penaliza más false negatives
+                self.beta = 0.3   # Menos peso a false positives
+                self.gamma = 1.5  # Focal weight
+                
+            def forward(self, logits, targets):
+                device = logits.device
+                dtype = logits.dtype
+                num_classes = logits.shape[1]
+                probs = F.softmax(logits, dim=1)
+                
+                # One-hot encoding
+                targets_one_hot = F.one_hot(
+                    targets.squeeze(1).long(), 
+                    num_classes
+                ).permute(0, 4, 1, 2, 3).float().to(device=device, dtype=dtype)
+                
+                # Skip background para Tversky
+                probs_fg = probs[:, 1:]
+                targets_fg = targets_one_hot[:, 1:]
+                
+                # Tversky components
+                tp = (probs_fg * targets_fg).sum(dim=(2, 3, 4))
+                fp = (probs_fg * (1 - targets_fg)).sum(dim=(2, 3, 4))
+                fn = ((1 - probs_fg) * targets_fg).sum(dim=(2, 3, 4))
+                
+                # Tversky index
+                tversky = (tp + 1e-5) / (tp + self.alpha * fn + self.beta * fp + 1e-5)
+                
+                # Focal Tversky loss
+                focal_tversky = torch.pow(1.0 - tversky, self.gamma)
+                
+                return focal_tversky.mean()
+        
+        return FocalTverskyBalanced()
+    
+    elif loss_name == "dice_only": # NO FUNCIONA BIEN, MEJOR NO USARLO
+        """Solo Dice loss - simple pero efectivo"""
+        return DiceLoss(
+            include_background=False,
             to_onehot_y=True,
             softmax=True,
-            reduction="mean",
-            batch=True                 # agrega por batch (más estable con clases pequeñas)
+            batch=True,
+            smooth_nr=1e-5,
+            smooth_dr=1e-5
         )
-
-        def loss_dicece_hd95(logits, y, w_dice=0.7, w_hd=0.3):
-            # combinación estable
-            return w_dice * dicece(logits, y) + w_hd * hd(logits, y)
-
-        return loss_dicece_hd95
-
-    elif loss_name == "gdl_focal":
-
-        gdl = GeneralizedDiceLoss(include_background=True, to_onehot_y=True, softmax=True)
-        fl  = FocalLoss(to_onehot_y=True, use_softmax=True, gamma=2.0)
-
-        def loss_gdl_focal(logits, y):
-            return 0.6 * gdl(logits, y) + 0.4 * fl(logits, y)
-        return loss_gdl_focal
     
-    elif loss_name == "focal_tversky":
-
-
-        class FocalTverskyLoss(nn.Module):
-            def __init__(self, alpha=0.7, beta=0.3, gamma=4/3, eps=1e-6, include_background=True):
+    elif loss_name == "dice_ce":
+        """DiceCE de MONAI sin modificaciones"""
+        return DiceCELoss(
+            include_background=False,
+            to_onehot_y=True,
+            softmax=True,
+            lambda_dice=1.0,
+            lambda_ce=1.0
+        )
+    
+    elif loss_name == "balance_ce_focal":
+        """Version alternativa con balance dinámico"""
+        class BalancedDiceFocalLoss(nn.Module):
+            def __init__(self):
                 super().__init__()
-                self.alpha, self.beta, self.gamma = alpha, beta, gamma
-                self.eps = eps
-                self.include_background = include_background
-
-            def forward(self, logits, y):
-                # y: (B,1,D,H,W) con índices 0/1/2 -> onehot
-                num_classes = logits.shape[1]
-                y_onehot = F.one_hot(y.long().squeeze(1), num_classes=num_classes).permute(0,4,1,2,3).float()
-                if not self.include_background and num_classes > 1:
-                    y_onehot = y_onehot[:,1:]
-                    logits   = logits[:,1:]
-                p = torch.softmax(logits, dim=1)
-
-                dims = tuple(range(2, p.ndim))
-                tp = (p * y_onehot).sum(dims)
-                fp = (p * (1 - y_onehot)).sum(dims)
-                fn = ((1 - p) * y_onehot).sum(dims)
-
-                tversky = (tp + self.eps) / (tp + self.alpha*fn + self.beta*fp + self.eps)
-                focal_tversky = torch.pow((1.0 - tversky), self.gamma)
-                return focal_tversky.mean()
-
-        ftl = FocalTverskyLoss(alpha=0.7, beta=0.3, gamma=1.33, include_background=True)
-        return ftl
+                self.dice = DiceLoss(
+                    include_background=False,
+                    to_onehot_y=True,
+                    softmax=True,
+                    squared_pred=True
+                )
+                # FocalLoss sin weights inicialmente
+                self.focal = FocalLoss(
+                    include_background=False,
+                    to_onehot_y=True,
+                    gamma=2.0
+                )
+                self.focal_weight = None
+                
+            def forward(self, logits, targets):
+                device = logits.device
+                dtype = logits.dtype
+                
+                # Crear pesos dinámicamente
+                if self.focal_weight is None or self.focal_weight.device != device:
+                    self.focal_weight = torch.tensor([1.2, 1.5], device=device, dtype=dtype)
+                
+                # Aplicar pesos
+                self.focal.weight = self.focal_weight
+                
+                # Calcular losses
+                dice_loss = self.dice(logits, targets)
+                focal_loss = self.focal(logits, targets)
+                
+                # Balance adaptativo
+                with torch.no_grad():
+                    pred = torch.argmax(logits, dim=1)
+                    n_left = (pred == 1).sum()
+                    n_right = (pred == 2).sum()
+                    balance_factor = torch.clamp(n_left / (n_right + 1e-5), 0.5, 2.0)
+                
+                return dice_loss + focal_loss * balance_factor
+        
+        return BalancedDiceFocalLoss()
     
-
-    elif loss_name == "dice_ce_symmetry":
-
-        dicece = DiceCELoss(to_onehot_y=True, softmax=True)
-
-        def symmetry_regularizer(logits, axis=3):  # axis: W en [B,C,D,H,W]
-            p = torch.softmax(logits, dim=1)
-            p_flip = torch.flip(p, dims=[axis])
-            # swap L<->R channels (asumiendo [0:bg,1:L,2:R])
-            p_flip_swapped = torch.stack([p_flip[:,0], p_flip[:,2], p_flip[:,1]], dim=1)
-            return F.mse_loss(p[:,1:], p_flip_swapped[:,1:])  # compara solo L/R
-
-        def loss_dicece_sym(logits, y, lam_sym=0.1):
-            return dicece(logits, y) + lam_sym * symmetry_regularizer(logits, axis=4)  # eje=4 si W es el último
-
-        return loss_dicece_sym
-
-    elif loss_name == "lovasz_softmax":
-
-        def lovasz_grad(gt_sorted):
-            # gradiente de Lovasz extension para IoU
-            gts = gt_sorted.sum()
-            if gts == 0:
-                return gt_sorted * 0.0
-            intersection = gts - gt_sorted.cumsum(0)
-            union = gts + (1 - gt_sorted).cumsum(0)
-            jaccard = 1.0 - intersection / union
-            if gt_sorted.numel() > 1:
-                jaccard[1:] = jaccard[1:] - jaccard[:-1]
-            return jaccard
-
-        def flatten_probas(probas, labels, ignore=None):
-            # probas: [B,C,*], labels: [B,1,*] o [B,*]
-            if labels.ndim == probas.ndim:
-                labels = labels.squeeze(1)
-            B, C = probas.shape[:2]
-            probas = probas.permute(0, *range(2, probas.ndim), 1).contiguous().view(-1, C)  # [N,C]
-            labels = labels.contiguous().view(-1)  # [N]
-            if ignore is None:
-                return probas, labels
-            valid = labels != ignore
-            return probas[valid], labels[valid]
-
-        def lovasz_softmax_flat(probas, labels, classes='present'):
-            """
-            probas: [N, C] probs (softmax ya aplicado)
-            labels: [N] int64
-            classes: 'all' | 'present' | lista de ints
-            """
-            C = probas.size(1)
-            losses = []
-            class_to_sum = range(C) if classes in ['all', 'present'] else classes
-            for c in class_to_sum:
-                fg = (labels == c).float()            # foreground para clase c
-                if (classes == 'present') and (fg.sum() == 0):
-                    continue
-                if fg.numel() == 0:
-                    continue
-                # error absoluto por clase c (1 - p_c para pixeles de clase c; p_c para resto)
-                pc = probas[:, c]
-                errors = (fg - pc).abs()
-                # ordenar por error desc
-                errors_sorted, perm = torch.sort(errors, descending=True)
-                fg_sorted = fg[perm]
-                grad = lovasz_grad(fg_sorted)
-                loss_c = torch.dot(F.relu(errors_sorted), grad)
-                losses.append(loss_c)
-            if len(losses) == 0:
-                return probas.sum() * 0.0
-            return torch.mean(torch.stack(losses))
-
-        def lovasz_softmax(logits, labels, classes='present', per_image=False, ignore_index=None):
-            """
-            logits: [B,C,D,H,W], labels: [B,1,D,H,W] (índices)
-            """
-            if per_image:
-                loss = 0.0
-                for logit, label in zip(logits, labels):
-                    probas = torch.softmax(logit.unsqueeze(0), dim=1)  # [1,C,D,H,W]
-                    probas, lab = flatten_probas(probas, label.unsqueeze(0), ignore_index)
-                    loss += lovasz_softmax_flat(probas, lab, classes=classes)
-                return loss / logits.shape[0]
-            else:
-                probas = torch.softmax(logits, dim=1)
-                probas, lab = flatten_probas(probas, labels, ignore_index)
-                return lovasz_softmax_flat(probas, lab, classes=classes)
-
-
-        dicece = DiceCELoss(to_onehot_y=True, softmax=True, include_background=True)
-
-        def lovasz_softmax_loss(logits, y, classes="present"):
-            # logits: [B,C,D,H,W], y: [B,1,D,H,W] con índices {0,1,2}
-            return lovasz_softmax(logits, y, classes=classes, per_image=False, ignore_index=None)
-
-        def loss_fn(logits, y, w_dice=0.5, w_lovasz=0.5):
-            return w_dice * dicece(logits, y) + w_lovasz * lovasz_softmax_loss(logits, y)
-
-        return loss_fn
+    elif loss_name == "dice_ce_spatial":
+        """DiceCE con constraint espacial"""
+        class DiceCESpatialLoss(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.dice_ce = DiceCELoss(to_onehot_y=True, softmax=True)
+                
+            def forward(self, logits, targets):
+                device = logits.device
+                base_loss = self.dice_ce(logits, targets)
+                
+                # Agregar penalización espacial
+                B, C, D, H, W = logits.shape
+                probs = torch.softmax(logits, dim=1)
+                center = W // 2
+                
+                # Penalizaciones
+                spatial_loss = torch.tensor(0.0, device=device)
+                
+                # Left hippocampus should be on left side
+                if C > 1:  # Si tenemos clase 1
+                    left_prob = probs[:, 1]
+                    wrong_side = left_prob[:, :, :, center:].mean()
+                    spatial_loss = spatial_loss + wrong_side
+                
+                # Right hippocampus should be on right side  
+                if C > 2:  # Si tenemos clase 2
+                    right_prob = probs[:, 2]
+                    wrong_side = right_prob[:, :, :, :center].mean()
+                    spatial_loss = spatial_loss + wrong_side
+                
+                return base_loss + 0.3 * spatial_loss
+        
+        return DiceCESpatialLoss()
+    
+    elif loss_name == "focal_spatial": # NO FUNCIONA BIEN, MEJOR NO USARLO
+        """Focal Tversky con awareness espacial"""
+        class FocalTverskySpatialLoss(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.alpha = 0.7  # Peso para false negatives
+                self.beta = 0.3   # Peso para false positives
+                self.gamma = 2.0  # Focal parameter
+                
+            def forward(self, logits, y):
+                device = logits.device
+                dtype = logits.dtype
+                num_classes = logits.shape[1]
+                B, C, D, H, W = logits.shape
+                
+                # One-hot encoding
+                y_onehot = F.one_hot(y.long().squeeze(1), num_classes).permute(0,4,1,2,3).float()
+                y_onehot = y_onehot.to(device=device, dtype=dtype)
+                
+                # Skip background
+                y_onehot = y_onehot[:,1:]
+                logits_fg = logits[:,1:]
+                
+                p = torch.softmax(logits_fg, dim=1)
+                
+                # Tversky components
+                tp = (p * y_onehot).sum(dim=(2,3,4))
+                fp = (p * (1 - y_onehot)).sum(dim=(2,3,4))
+                fn = ((1 - p) * y_onehot).sum(dim=(2,3,4))
+                
+                tversky = (tp + 1e-5) / (tp + self.alpha*fn + self.beta*fp + 1e-5)
+                focal_tversky = torch.pow(1.0 - tversky, self.gamma)
+                
+                # Spatial penalty
+                center = W // 2
+                probs_full = torch.softmax(logits, dim=1)
+                
+                spatial_penalty = torch.tensor(0.0, device=device)
+                if num_classes > 1:
+                    left_wrong = probs_full[:, 1, :, :, center:].mean()
+                    spatial_penalty = spatial_penalty + left_wrong * 0.5
+                if num_classes > 2:
+                    right_wrong = probs_full[:, 2, :, :, :center].mean()
+                    spatial_penalty = spatial_penalty + right_wrong * 0.5
+                
+                return focal_tversky.mean() + 0.25 * spatial_penalty
+        
+        return FocalTverskySpatialLoss()
+    
+    else:
+        print(f"Warning: Unknown loss {loss_name}, using dice_ce_balanced")
+        return create_loss_function("dice_ce_balanced")

@@ -1,10 +1,14 @@
 
 from monai.networks.nets import UNet
 from .seg_models.unest import UNesT133Adapter
+from .seg_models.unestpn import UNesT133PANetASPPAdapter
 from .seg_models.swinunetr import AdaptedSwinUNETR
 from .seg_models.segresnet import AdaptedSegResNetV2
 import torch
 import torch.nn as nn
+import segmentation_models_pytorch_3d as smp
+import torch
+
 ################################################################################
 # MODELOS
 ################################################################################
@@ -23,8 +27,47 @@ def create_model(model_name="unet",device="cuda:5"):
             channels=(16, 32, 64, 128),
             strides=(2, 2, 2),
         )
+
+    elif model_name.lower() == "dpn131":
+
+        return smp.Unet(
+            encoder_name="dpn131", # choose encoder, e.g. resnet34
+            in_channels=1,                  # model input channels (1 for gray-scale volumes, 3 for RGB, etc.)
+            classes=3,                      # model output channels (number of classes in your dataset)
+        )
+    
+    elif model_name.lower() == "resnet152":
+
+        return smp.Unet(
+            encoder_name="resnet152", # choose encoder, e.g. resnet34
+            in_channels=1,                  # model input channels (1 for gray-scale volumes, 3 for RGB, etc.)
+            classes=3,                      # model output channels (number of classes in your dataset)
+        )
+    	
+
+    elif model_name.lower() == "eff-b7":
+
+        return smp.Unet(
+            encoder_name="efficientnet-b7", # choose encoder, e.g. resnet34
+            in_channels=1,                  # model input channels (1 for gray-scale volumes, 3 for RGB, etc.)
+            classes=3,                      # model output channels (number of classes in your dataset)
+        )
+
+
+    elif model_name.lower() == "eff-b2":
+
+        return smp.Unet(
+            encoder_name="efficientnet-b1", # choose encoder, e.g. resnet34
+            in_channels=1,                  # model input channels (1 for gray-scale volumes, 3 for RGB, etc.)
+            classes=3,                      # model output channels (number of classes in your dataset)
+        )
+
+
     elif model_name.lower() == "unest":
         return UNesT133Adapter(device=device, num_classes = 3)
+
+    elif model_name.lower() == "unestpn":
+        return UNesT133PANetASPPAdapter(device=device, num_classes = 3)
 
     elif model_name.lower() == "swinunetr":
         return AdaptedSwinUNETR(

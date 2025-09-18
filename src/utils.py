@@ -23,6 +23,9 @@ except ImportError:
     F = None  # type: ignore
 
 
+
+
+
 def one_hot(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
     """Convert a tensor of integer labels to one‑hot encoding along a new channel axis.
 
