@@ -1,11 +1,5 @@
-train/
-images/
-
-results_images_new/
-wandb/
-codes/fold_models/
-
-results/preprocessed_data/
+results/
+**/*.csv
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

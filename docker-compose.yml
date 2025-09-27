@@ -1,0 +1,48 @@
+x-common-env: &common-env
+  INPUT_DIR: /input
+  OUTPUT_DIR: /output
+  CONTAINER_TIMEZONE: Etc/UTC
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rise_task2:dev
+    container_name: rise_task2-dev
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    environment:
+      <<: *common-env
+    volumes:
+      - ${LISA_INPUT:-/mnt/e/Datathon/LISA/input/task-2-val}:/input:ro
+      - ${LISA_OUTPUT:-/mnt/e/Datathon/LISA/output}:/output:rw
+      - .:/my_solution:rw
+    working_dir: /my_solution
+    stdin_open: true
+    tty: true
+    entrypoint: [ "bash" ]
+
+  run:
+    # 👉 Construye SIEMPRE tu imagen local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Etiqueta local clara; NO uses aquí la del registro para evitar confusión
+    image: rise_task2:local
+    pull_policy: never          # 👈 JAMÁS jales del registro
+    container_name: rise_task2-run
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    environment:
+      <<: *common-env
+    volumes:
+      - ${LISA_INPUT:-/mnt/e/Datathon/LISA/input/task-2-val}:/input:ro
+      - ${LISA_OUTPUT:-/mnt/e/Datathon/LISA/output}:/output:rw
+    # ENTRYPOINT viene del Dockerfile

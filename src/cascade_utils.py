@@ -1,39 +1,5 @@
 """
 cascade_utils.py
-=================
-
-This module contains helper functions and classes for implementing a
-two‑stage (coarse→fine) segmentation pipeline for small structures such
-as the hippocampus.  A low–resolution coarse model locates the target
-structure in the full volume.  The predicted region of interest (ROI)
-is cropped from the original volume (optionally with a margin),
-resampled to a finer spatial resolution and passed through a second
-network to refine the segmentation.  By focusing the refinement on a
-smaller volume, the model can operate at higher resolution without
-exceeding GPU memory.  The crop functions can also be used with
-ground‑truth labels during training to simulate predicted bounding
-boxes.
-
-This file does not depend on the rest of the training script; you can
-import its functions into your own training pipeline.  See the
-``CascadeDataset`` class for an example of how to integrate coarse
-predictions into dataset loading.
-
-Example usage::
-
-    from cascade_utils import get_roi_bbox_from_logits, crop_to_bbox, resize_volume
-    # assume logits_coarse is [B,C,D,H,W] and img, lbl are [B,1,D,H,W]
-    bboxes = get_roi_bbox_from_logits(logits_coarse, thr=0.2, margin=8)
-    crops, lbl_crops = [], []
-    for i, bb in enumerate(bboxes):
-        crops.append(resize_volume(crop_to_bbox(img[i:i+1], bb), (160,160,160)))
-        lbl_crops.append(resize_volume(crop_to_bbox(lbl[i:i+1], bb), (160,160,160), mode="nearest"))
-
-    # feed crops through refinement model
-
-Note: During early training the coarse model may not predict anything;
-you should fall back to using bounding boxes derived from ground
-truth.  See scheduled sampling strategies in the training script.
 """
 
 import torch

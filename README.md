@@ -1,57 +1,86 @@
-# rise-miccai-challenge2025
+# RISE-MICCAI LISA 2025: Hippocampus Segmentation
 
+Two-stage cascade deep learning pipeline for 3D hippocampus segmentation in ultra-low-field neonatal MRI.
 
-https://summer.rise-miccai.org
+## Quick Start
 
-The challenge of automatic segmentation in low-field MRI environments poses a significant hurdle, particularly in regions with limited resources where high-field MRI systems are scarce. Structural delineation becomes even more challenging due to the lower resolution of accessible systems like the 0.064T Hyperfine scanner. Despite these obstacles, the benefits of utilizing low-field MRI, such as portability and reduced clinical costs, are undeniable, especially in settings where sedation for young patients is impractical.
-
-Addressing this segmentation challenge head-on, the LISA challenge introduces its second task. Participants are called upon to pioneer deep learning methods tailored for automatically segmenting the (A) bilateral hippocampi and (B) basal ganglia in ultra low-field (0.064T) T2-weighted MRI images of early childhood brains. Both structures play a critical role in cognitive functions, making their accurate segmentation essential for understanding abnormal neurodevelopment.
-
-
-Dataset
-Data description
-High field T2 data was acquired at Kawempe National Referral Hospital, Makerere University, Kampala, Uganda; CUBIC, University of Cape Town, South Africa and Warren Alpert Medical School at Brown University, Providence, RI, USA, and the Advanced Baby Imaging Lab, Rhode Island Hospital, Providence, RI, USA. All images were collected by MRI techs with experience imaging patients at the institutions listed above. High field scans are synchronized with matching low field Hyperfine scans of the same subjects. All bilateral hippocampi segmentations, supporting ventricle segmentations, and basal ganglia segmentations were reviewed by an expert medical image evaluator.
-
-Participants in this task will have access to combined isometric hyperfine images (in NIFTI .nii.gz format) which have been 9-point linearly registered to their subjects' matching high field scans. Bilateral hippocampi segmentations are in NIFTI .nii.gz format and will be in high field scan space.
-
-
-# Setup
-
-From root:
-```
-python codes/1.download_data.py
-```
-
-scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/LISAHF0001segprediction.nii.gz .
-
-scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/LISAHF0001segprediction.nii.gz C:\Users\TU_USUARIO\Downloads\
-
-
-scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_dynunet_02/LISAHF0001segprediction.nii.gz .
-
-scp va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_03_train/LISAHF0001segprediction.nii.gz .
-
-scp -r va0831@148.100.72.4:/data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/eff-dice_ce_balanced/submissions_with_folds/ .
-
-
-
+### Installation
 ```bash
-python train.py \
-  --train_csv results/preprocessed_data/task2/df_train_hipp.csv \
-  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_01 \
-  --model unest \
-  --folds 3 \
-  --epochs 50 \
-  --batch_size 4 \
-  --gpu 5
+git clone https://github.com/yourusername/rise-miccai-lisa2025.git
+cd rise-miccai-lisa2025
+pip install -r requirements.txt
 ```
 
-
+### Training
 ```bash
-python inference.py \
-  --test_csv results/preprocessed_data/task2/df_test_hipp.csv \
-  --model_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/results/model_unest_01/fold_0 \
-  --model unest \
-  --output_dir /data/cristian/projects/med_data/rise-miccai/task-2/3d_models/predictions/model_unest_01/
+python 0_train.py \
+  --model_name eff-b2 \
+  --root_dir ./models/exp1 \
+  --num_epochs 150 \
+  --num_folds 5 \
+  --batch_size 2 \
+  --dim 192 \
+  --device cuda:0
 ```
-"""
+
+### Inference
+```bash
+# 1. Create test CSV
+python 1_csv_creation.py --val_path_dir /input --path_results ./results/
+
+# 2. Run inference
+python 2_inference_cascade.py \
+  --test_csv ./results/preprocessed_data/df_test.csv \
+  --models_dir ./models/exp1/fold_models \
+  --output_dir ./predictions \
+  --model_name eff-b2 \
+  --dim 192 \
+  --use_tta 1
+```
+
+## Docker Usage
+
+### Build & Run
+```bash
+# Build
+docker build -t rise_task2:latest .
+
+# Development
+docker compose run --rm dev bash
+
+# Production
+docker compose up run
+```
+
+### Synapse Submission
+```bash
+# 1. Tag
+docker tag rise_task2:latest docker.synapse.org/SYN_ID/rise_task2:v1.0
+
+# 2. Login
+docker login docker.synapse.org
+
+# 3. Push
+docker push docker.synapse.org/SYN_ID/rise_task2:v1.0
+
+# 4. Test locally
+docker run --rm \
+  -v /path/to/input:/input:ro \
+  -v /path/to/output:/output:rw \
+  docker.synapse.org/SYN_ID/rise_task2:v1.0
+```
+
+## Key Features
+- **Cascade architecture**: Base model (ROI detection) + Fine model (refinement)
+- **3-class segmentation**: Background (0), Left hippocampus (1), Right hippocampus (2)
+- **TTA with safe flips**: Preserves laterality
+- **5-fold cross-validation**: Group-wise splitting
+- **Post-processing**: Morphological operations + component filtering
+
+## Requirements
+- GPU: NVIDIA with 4GB+ VRAM
+- CUDA: 11.7+
+- Python: 3.8+
+
+## License
+MIT

@@ -1,0 +1,10 @@
+.git
+__pycache__/
+*.ipynb_checkpoints
+results/2d_images_all/
+results/preprocessed_data/
+results/*checkpoints*
+*.pth
+*.pt
+*.ckpt
+node_modules/
