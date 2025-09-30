@@ -6,7 +6,7 @@ Two-stage cascade deep learning pipeline for 3D hippocampus segmentation in ultr
 
 ### Installation
 ```bash
-git clone https://github.com/yourusername/rise-miccai-lisa2025.git
+git clone https://github.com/CristianLazoQuispe/rise-miccai-lisa2025.git
 cd rise-miccai-lisa2025
 pip install -r requirements.txt
 ```
