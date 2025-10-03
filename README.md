@@ -2,6 +2,8 @@
 
 Two-stage cascade deep learning pipeline for 3D hippocampus segmentation in ultra-low-field neonatal MRI.
 
+![Pipeline Architecture](images/pipeline.png)
+
 ## Quick Start
 
 ### Installation
@@ -13,7 +15,8 @@ pip install -r requirements.txt
 
 ### Training
 ```bash
-python 0_train.py \
+python download_data.py
+python train.py \
   --model_name eff-b2 \
   --root_dir ./models/exp1 \
   --num_epochs 150 \
@@ -26,10 +29,10 @@ python 0_train.py \
 ### Inference
 ```bash
 # 1. Create test CSV
-python 1_csv_creation.py --val_path_dir /input --path_results ./results/
+python csv_creation.py --val_path_dir /input --path_results ./results/
 
 # 2. Run inference
-python 2_inference_cascade.py \
+python inference_cascade.py \
   --test_csv ./results/preprocessed_data/df_test.csv \
   --models_dir ./models/exp1/fold_models \
   --output_dir ./predictions \

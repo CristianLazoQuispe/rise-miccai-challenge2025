@@ -31,7 +31,7 @@ WORKDIR /my_solution
 
 # Código
 COPY ./src ./src
-COPY ./2.csv_creation.py ./2.csv_creation.py
+COPY ./csv_creation.py ./csv_creation.py
 COPY ./inference_cascade.py ./inference_cascade.py
 
 # Pesos (dentro de la imagen); si prefieres montarlos, mira el compose de abajo
